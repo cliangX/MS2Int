@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / Editor
+.idea/
+.vscode/
+
+# Logs / outputs
+logs/
+*.log
+outputs/
+
+# Model checkpoints
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+*.pkl
+
+# Large scientific data (recommend external hosting)
+*.h5
+*.hdf5
+*.mzML
+*.mzml
+
