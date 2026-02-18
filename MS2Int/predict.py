@@ -122,14 +122,14 @@ with h5py.File(input_path, "r") as f:
     seq_ds = f.get("Sequence", None)
     total_samples = int(length_ds.shape[0])
 
-    # 训练/推理统一过滤策略：Length<=30 且序列不包含 'U'
+    # Unified filter: Length<=30 and sequence must not contain 'U'
     chunk_size = 200_000
     valid_indices = []
     filtered_by_length = 0
     filtered_by_u = 0
 
     if seq_ds is None:
-        print("Warning: 输入 H5 缺少 Sequence 数据集，无法执行去U过滤（仅做 Length<=30 过滤）")
+        print("Warning: input H5 is missing the Sequence dataset; skipping U-filter (Length<=30 filter only)")
 
     for start in range(0, total_samples, chunk_size):
         end = min(start + chunk_size, total_samples)
@@ -141,7 +141,7 @@ with h5py.File(input_path, "r") as f:
         else:
             seq_chunk = np.asarray(seq_ds[start:end])
             if seq_chunk.dtype.kind == "O":
-                # 兼容可变长字符串/bytes：转成 bytes 固定长度再做矢量化查找
+                # Compat: convert variable-length str/bytes to fixed-length bytes for vectorized search
                 seq_chunk = seq_chunk.astype("S")
 
             if seq_chunk.dtype.kind in ("S", "a"):

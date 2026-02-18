@@ -105,8 +105,9 @@ def run_step1(config):
             processed += 1
             total_before += before
             total_after += after
-        except Exception as e:
+        except (pd.errors.ParserError, OSError, UnicodeDecodeError, ValueError) as e:
             failed += 1
+            print(f"Warning: failed to process {file_name}: {e}")
 
     print(f"MSMS filter: ok={processed}, failed={failed}, before={total_before}, after={total_after}")
 

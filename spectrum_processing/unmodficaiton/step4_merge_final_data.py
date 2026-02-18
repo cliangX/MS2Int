@@ -17,7 +17,7 @@ def process_file(path, dataset_name):
         df = pd.read_hdf(path, "combined_data")
         df["dataset"] = dataset_name
         return df
-    except Exception as e:
+    except (FileNotFoundError, OSError, KeyError, ValueError) as e:
         print(f"Failed to read {path}: {e}")
         return None
     finally:

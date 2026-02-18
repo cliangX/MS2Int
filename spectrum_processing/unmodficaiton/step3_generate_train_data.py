@@ -87,26 +87,31 @@ def process_file(file_path, ylabel_df_dir, mode: str = "unmodified"):
                 train_data[idx] = np.zeros((ION_ROWS, ION_COLS), dtype=float)
                 continue
 
-            # unmodified：同名离子只取第一个；phospho：先归一化离子名再累加
+            # unmodified: keep first occurrence per ion name; phospho: normalize ion name then accumulate
             vec = np.zeros(flat_len, dtype=float)
             filled = np.zeros(flat_len, dtype=bool) if mode != "phospho" else None
-            try:
-                for name, inten in fragments:
-                    if mode == "phospho":
-                        norm_name = _normalize_ion_name(name)
-                        if norm_name is None:
-                            continue
-                        j = ION_TO_IDX.get(norm_name)
-                        if j is not None:
-                            vec[j] += float(inten)
-                    else:
-                        j = ION_TO_IDX.get(name)
-                        if j is not None and not filled[j]:
-                            vec[j] = float(inten)
-                            filled[j] = True
-            except Exception:
-                # If fragments is malformed, fallback to zeros
-                pass
+            for fragment in fragments:
+                if not isinstance(fragment, (list, tuple)) or len(fragment) != 2:
+                    continue
+
+                name, inten = fragment
+                inten_val = pd.to_numeric(inten, errors="coerce")
+                if pd.isna(inten_val):
+                    continue
+                inten_val = float(inten_val)
+
+                if mode == "phospho":
+                    norm_name = _normalize_ion_name(name)
+                    if norm_name is None:
+                        continue
+                    j = ION_TO_IDX.get(norm_name)
+                    if j is not None:
+                        vec[j] += inten_val
+                else:
+                    j = ION_TO_IDX.get(name)
+                    if j is not None and not filled[j]:
+                        vec[j] = inten_val
+                        filled[j] = True
             train_data[idx] = vec.reshape((ION_ROWS, ION_COLS))
 
         df['train_data'] = train_data

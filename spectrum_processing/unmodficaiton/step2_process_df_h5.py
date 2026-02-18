@@ -14,12 +14,12 @@ import pandas as pd
 
 try:
     import pyopenms as oms  # type: ignore
-except Exception:
+except ImportError:
     oms = None  # type: ignore
 
 try:
     from spectrum_utils import fragment_annotation, proforma  # type: ignore
-except Exception:
+except ImportError:
     fragment_annotation = None  # type: ignore
     proforma = None  # type: ignore
 from tqdm import tqdm
@@ -52,13 +52,13 @@ def apply_modifications(sequence):
 
 
 def generate_theoretical_fragments(annotate, mode: str):
-    """按模式生成理论碎片。
+    """Generate theoretical fragments for the given mode.
 
-    - unmodified：保持原有 byIm/max_charge=2，并过滤掉带电 m 离子（包含 'm' 且包含 '^'）。
-    - phospho：在 byIm/max_charge=2 基础上增加 H3PO4 中性丢失，并仅保留覆盖磷酸化位点的 -H3PO4 碎片。
+    - unmodified: use byIm/max_charge=2, filter out charged m ions (containing 'm' and '^').
+    - phospho: add H3PO4 neutral loss on top of byIm/max_charge=2, keep only -H3PO4 fragments covering phosphosite.
     """
     if proforma is None or fragment_annotation is None:
-        raise ImportError("缺少依赖：spectrum_utils（用于生成理论碎片）")
+        raise ImportError("Missing dependency: spectrum_utils (required for theoretical fragment generation)")
 
     mode = str(mode or "unmodified").strip().lower()
     annotate = str(annotate)
@@ -66,7 +66,7 @@ def generate_theoretical_fragments(annotate, mode: str):
     try:
         seq = proforma.parse(annotate)
     except Exception as e:
-        print(f"Warning: ProForma 解析失败：{annotate} -> {e}")
+        print(f"Warning: ProForma parse failed: {annotate} -> {e}")
         return []
 
     if not seq:
@@ -83,7 +83,7 @@ def generate_theoretical_fragments(annotate, mode: str):
                 },
             )
         except Exception as e:
-            print(f"Warning: 理论碎片生成失败：{annotate} -> {e}")
+            print(f"Warning: theoretical fragment generation failed: {annotate} -> {e}")
             return []
 
         seq_len = len(seq[0].sequence)
@@ -103,7 +103,7 @@ def generate_theoretical_fragments(annotate, mode: str):
             if "phospho" in label_text:
                 phospho_sites.add(pos + 1)
 
-        # 某些情况下 modifications 解析不到，这里兜底从 ProForma 字符串中识别 [Phospho] 标注位置
+        # Fallback: if modifications were not parsed, detect [Phospho] positions from the ProForma string directly
         if not phospho_sites:
             depth = 0
             pos = 0
@@ -233,7 +233,7 @@ try:
     from numba import njit  # type: ignore
 
     _NUMBA = True
-except Exception:
+except ImportError:
     _NUMBA = False
 
 
@@ -355,7 +355,7 @@ def fast_intensity_matching(
     is_ppm = mass_analyzer == "FTMS"
     tol_value = 20.0 if is_ppm else 0.5
 
-    # phospho：若 m 离子与 b/y 离子 m/z 在容差内重叠，则将该 m 离子置为 NaN，避免重复/污染匹配
+    # phospho: if m-ion m/z overlaps with a b/y ion within tolerance, set it to NaN to avoid duplicate matching
     if mode == "phospho" and by_mz_vals and m_indices:
         by_mz_sorted = np.sort(np.asarray(by_mz_vals, dtype=np.float64))
         for mi in m_indices:
@@ -424,7 +424,7 @@ def parallel_intensity_matching(
 def process_pair(meta_path, mz_path, msms_root, df_h5_dir, inner_num_procs=4, mode: str = "unmodified"):
     try:
         if oms is None:
-            raise ImportError("缺少依赖：pyopenms（用于读取 mzML）")
+            raise ImportError("Missing dependency: pyopenms (required for mzML reading)")
         file_name = os.path.basename(meta_path)
         MSMS = os.path.join(msms_root, file_name)
 
@@ -509,7 +509,7 @@ def process_pair(meta_path, mz_path, msms_root, df_h5_dir, inner_num_procs=4, mo
                         x.decode() for x in precursor.getActivationMethodsAsShortString()
                     ]
                     frag = short[0] if short else ""
-                except Exception:
+                except (AttributeError, TypeError, UnicodeDecodeError):
                     frag = ""
                 if frag:
                     mz_df.at[idx, "Fragmentation_mzml"] = frag
@@ -575,7 +575,7 @@ def run_step2(config):
 
         mzml_path = mzml_map.get(experiment_name)
         if mzml_path is None:
-            # 兼容旧逻辑：允许“包含匹配”，但会提示风险
+            # Fallback: allow substring matching for backward compatibility
             candidates = [
                 os.path.join(mzml_root, f)
                 for f in mzml_names
@@ -587,7 +587,7 @@ def run_step2(config):
             candidates.sort()
             if mode == "phospho":
                 print(
-                    f"Warning: phospho 模式未找到精确匹配，使用包含匹配：{experiment_name} -> {os.path.basename(candidates[0])}"
+                    f"Warning: phospho mode - no exact mzML match found, using substring match: {experiment_name} -> {os.path.basename(candidates[0])}"
                 )
             if len(candidates) > 1:
                 print(

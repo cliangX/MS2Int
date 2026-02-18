@@ -3,7 +3,7 @@
 Usage:
     python run.py --msms msms.txt --mzml-dir ./mzml --mode unmodified
     python run.py --msms msms.txt --mzml-dir ./mzml --mode phospho
-    # 输出单文件（推荐）：自动推断输出目录 + 重命名 batch1 产物
+    # Output single file (recommended): auto-infer output dir and rename batch1 product
     python run.py --msms msms.txt --mzml-dir ./mzml --output ./out/train.h5
 
 Steps:
@@ -50,7 +50,7 @@ def _clean_directory(path):
                 os.remove(p)
             elif os.path.isdir(p):
                 shutil.rmtree(p)
-        except Exception as e:
+        except OSError as e:
             print(f"Warning: failed to delete {p}: {e}")
 
 def cleanup_intermediate_dirs(config):
@@ -91,34 +91,30 @@ def _rename_final_h5(output_dir: str, dataset_name: str, final_h5: str) -> None:
     print(f"[OK] Final H5 renamed: {dst}")
 
 def _resolve_output_paths(args) -> tuple[str, str]:
-    """统一解析输出参数。
+    """Resolve output directory and final H5 path from --output argument.
 
-    目标：用 `--output` 统一控制输出目录与最终单文件输出。
-
-    规则：
-    - 若传入 `--output`（推荐）：
-        - 如果是目录：仅作为输出目录，不重命名 batch1
-        - 如果是文件：输出目录为文件所在目录，并将 batch1 重命名为该文件
-    - 若未传 `--output`：默认输出目录为 ./output，不重命名 batch1
+    - If --output is a file path (.h5/.hdf5/.hdf): output dir = parent dir, rename batch1 to that file.
+    - If --output is a directory path: output dir = that directory, no renaming.
+    - If --output is omitted: output dir = ./output, no renaming.
     """
 
     output = (getattr(args, "output", "") or "").strip()
 
     if output:
-        # 统一展开 ~
+        # Expand ~ in path
         output = os.path.expanduser(output)
 
-        # 优先按扩展名判断：.h5/.hdf5/.hdf 认为是文件，否则认为是目录
+        # Determine type by extension: .h5/.hdf5/.hdf = file, otherwise directory
         lower = output.lower()
         looks_like_file = lower.endswith((".h5", ".hdf5", ".hdf"))
 
-        # 允许传目录：如 --output ./out/ 或 --output ./out
+        # Allow directory paths: e.g. --output ./out/ or --output ./out
         if (not looks_like_file) or output.endswith(os.sep) or (
             os.path.exists(output) and os.path.isdir(output)
         ):
             return output, ""
 
-        # 文件：如 --output data/training/train.h5
+        # File path: e.g. --output data/training/train.h5
         out_dir = os.path.dirname(output) or os.getcwd()
         return out_dir, output
 
@@ -134,7 +130,7 @@ if __name__ == "__main__":
         type=str,
         choices=('unmodified', 'phospho'),
         default='unmodified',
-        help="处理模式：unmodified=未修饰；phospho=磷酸化（默认：unmodified）",
+        help="Processing mode: unmodified or phospho (default: unmodified)",
     )
     parser.add_argument('--dataset-name', type=str, default=None, help='Output dataset name (auto-inferred if omitted)')
     parser.add_argument('--num-workers', type=int, default=32, help='Number of parallel workers (default: 32)')
@@ -144,8 +140,8 @@ if __name__ == "__main__":
         type=str,
         default='',
         help=(
-            '输出路径：推荐传单文件，例如 data/training/train.h5；'
-            '也可传目录，例如 ./output/（仅输出 batch 文件，不重命名）'
+            'Output path: recommended as a single file, e.g. data/training/train.h5; '
+            'or a directory, e.g. ./output/ (outputs batch file without renaming)'
         ),
     )
     parser.add_argument('--skip-step1', action='store_true', help='Skip step 1')
@@ -227,7 +223,7 @@ if __name__ == "__main__":
                 if os.path.basename(_tmp_root) == 'tmp' and os.path.isdir(_tmp_root):
                     shutil.rmtree(_tmp_root)
                     print(f"[OK] Removed tmp directory: {_tmp_root}")
-            except Exception as e:
+            except OSError as e:
                 print(f"Warning: failed to remove {_tmp_root}: {e}")
 
         print("[OK] All steps completed")
