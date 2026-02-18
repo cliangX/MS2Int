@@ -29,7 +29,8 @@
 3. [Usage](#usage)
    * [Inference](#1-inference)
    * [VAT Training / Fine-tuning](#2-vat-training--fine-tuning)
-   * [FLR Pipeline](#3-flr-pipeline-phosphoproteomics-qc)
+   * [Rescore](#rescore)
+   * [MS2Int_flr](#5-ms2int_flr)
    * [Model Weights & Data](#model-weights--data)
 4. [Troubleshooting](#troubleshooting)
 5. [Citation](#citation)
@@ -86,9 +87,9 @@ Ensure you have the following before installation:
 
 ### Installation
 
-#### One-Click Reproduction Script (From Scratch)
+#### From Scratch
 
-该脚本按“本机已跑通”的路径整理（安装 `causal-conv1d` 以启用 Mamba2 fast path；Blackwell 需要升级/恢复 Triton）：
+This script follows a locally validated setup path (install `causal-conv1d` to enable the Mamba2 fast path; Blackwell requires upgrading/restoring Triton):
 
 **Step 1: Create conda environment**
 ```bash
@@ -119,21 +120,21 @@ export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 pip install --no-cache-dir --no-build-isolation .
 ```
 
-**Step 5：安装 causal-conv1d（启用 Mamba2 fast path）**
+**Step 5: Install causal-conv1d (enable Mamba2 fast path)**
 ```bash
 cd ..
 git clone https://github.com/Dao-AILab/causal-conv1d.git causal_conv1d_src
 cd causal_conv1d_src
 git -c safe.directory="$(pwd)" checkout v1.6.0
 
-# 强制从源码编译，避免预编译 wheel 与当前 torch ABI 不匹配
+# Force source build to avoid ABI mismatch between prebuilt wheels and the current torch version
 export CAUSAL_CONV1D_FORCE_BUILD=TRUE
 pip install --no-cache-dir --no-build-isolation .
 ```
 
-**Step 6：升级/恢复 Triton（支持 Blackwell）**
+**Step 6: Upgrade/restore Triton (for Blackwell support)**
 ```bash
-# 注意：安装 causal-conv1d 过程中可能会把 triton 拉回 torch pin 的 3.3.0；Blackwell 需要更高版本
+# Note: installing causal-conv1d may pull triton back to torch-pinned 3.3.0; Blackwell requires a newer version
 pip install --no-cache-dir --upgrade --force-reinstall triton==3.6.0
 ```
 
@@ -163,84 +164,137 @@ coming soon
 
 ### 1) Inference (from MaxQuant)
 
-从 MaxQuant 的 `msms.txt` + 对应的 `mzML` 生成 MS2Int 推理输入 H5（包含 `train_data`），再用模型写出 `Intpredict`。
+Generate the MS2Int inference input H5 (including `train_data`) from MaxQuant `msms.txt` and the corresponding `mzML`, then use the model to write `Intpredict`.
 
-**Step 1：从 MaxQuant 生成推理输入 H5（默认输出到 `data/MS2Int_input.h5`）**
+**Step 1: Generate inference input H5 from MaxQuant(`data/msms.txt` and `data/mzml/`)**
 
 ```sh
 python "spectrum_processing/unmodficaiton/run.py" \
   --msms "data/msms.txt" \
   --mzml-dir "data/mzml" \
-  --dataset-name "MS2Int_input" \
-  --output-dir "data"
+  --output "data/MS2Int_input.h5"
 ```
 
-**Step 2：运行 MS2Int 推理（把预测强度写入 `Intpredict`）**
+**Step 2: Run MS2Int inference (write predicted intensities into `Intpredict`)**
 
 ```sh
 python "MS2Int/predict.py" \
-  --ckpt "/mnt/data_nas/lcy/project_MS2predict/5.tools/dia/2.pick.NCE/3.finetune_out/best_epoch_5_val_loss_0.3569_0105_062132.pth" \
+  --ckpt "/mnt/public/lcy/random/B512_L4_vat/model_epoch_99_val_loss_0.1618_0129_135924.pth" \
   --input "data/MS2Int_input.h5" \
   --output "data/MS2Int_input.h5"
 ```
 
 **Notes:**
 
-* `run.py` 参数默认值：`--num-workers 32`、`--batch-size 400`（小样本建议 `--num-workers 1`）。
-* `run.py` 的 `--final-h5` 默认值是 `data/MS2Int_input.h5`（可显式指定其他路径；如需关闭重命名可传空字符串 `--final-h5 ""`）。
-* `Fragmentation`（HCD/CID）优先从 mzML 的 activation short string 提取；`collision_energy` 优先从 mzML 的 precursor meta value `collision energy` 提取。
-* `predict.py` 的 `--output` 可以与 `--input` 相同，此时会在同一个 H5 中新增/覆盖 `Intpredict`。
-* `predict.py` 默认只对长度 ≤30 的肽段做推理；更长的样本在输出中会用 0 填充。
+* The `Fragmentation` field (HCD/CID) reported in MaxQuant's msms.txt may be incorrectly extracted, so we extract `Fragmentation` and `collision_energy` directly from the mzML files instead.
 
-### 2) VAT Training / Fine-tuning
 
-**Training from scratch (example, adjust parameters according to your data and environment):**
+### 2) Inference (from CSV/TSV)
 
-```sh
-python MS2Int/main.py --train_data_pth "/path/to/train.h5"
+**Step 1: Prepare CSV/TSV file with required columns**
+
+**Demo input (`data/demo_input.csv`):**
+
+```csv
+Sequence,Length,Charge,collision_energy,Fragmentation
+PEPTIDEK,8,2,30,HCD
+ALLS[Phospho]LATHK,10,3,27,HCD
+[Acetyl]-M[Oxidation]AGLNK,6,2,30,CID
+C[Carbamidomethyl]DEFGHIK,8,2,25,HCD
 ```
 
-**Fine-tuning (initialize with pre-trained weights `--pth`):**
+**Step 2: Run MS2Int inference (CSV input auto-converted to H5)**
+
+```sh
+python "MS2Int/predict.py" \
+  --ckpt "/mnt/public/lcy/random/B512_L4_vat/model_epoch_99_val_loss_0.1618_0129_135924.pth" \
+  --input "data/demo_input.csv" \
+  --output "data/demo_output.h5"
+```
+
+### 3) Training / Fine-tuning / PTM Fine-tuning
+
+**Prepare training/Fine-tuning data (extract spectra):**
+
+Generate experimental fragment intensities from MaxQuant `msms.txt` and `mzML`:
+
+```sh
+python "spectrum_processing/unmodficaiton/run.py" \
+  --msms "data/msms.txt" \
+  --mzml-dir "data/mzml" \
+  --mode unmodified \
+  --output "data/training/train.h5"
+```
+
+**Training from scratch:**
+
+```sh
+python MS2Int/main.py --train_data_path "data/training/train.h5"
+```
+
+**Fine-tuning:**
 
 ```sh
 python MS2Int/fine_tune.py \
-  --pth "/path/to/pretrained.pth" \
-  --train_data_pth "/path/to/train.h5" \
-  --checkpoint_path "checkpoints/ms2int_vat/" \
+  --pth "/mnt/public/lcy/random/B512_L4_vat/model_epoch_99_val_loss_0.1618_0129_135924.pth" \
+  --train_data_path "data/training/train.h5" \
+  --checkpoint_path "checkpoints/" \
   --log_path "logs/train.log"
 ```
 
-**VAT-related hyperparameters (optional):**
+<a id="rescore"></a>
 
-| Parameter   | Description                      |
-|-------------|----------------------------------|
-| `--vat_alpha` | VAT loss weight                  |
-| `--vat_eps`   | Perturbation radius              |
-| `--vat_xi`    | Initial perturbation scale       |
-| `--vat_ip`    | Power iteration iterations       |
-
-### 3) FLR Pipeline (Phosphoproteomics QC)
-
-Execution entry point: `MS2Int_FLR/run_pipeline.sh`, requires model checkpoint path:
+### 4) Rescore
 
 ```sh
-MODEL_CKPT="/path/to/model.pth" \
-bash MS2Int_FLR/run_pipeline.sh "/path/to/PROJECT_ROOT"
+bash "spectrum_processing/rescore/run_pipeline.sh" \
+  "/path/to/WORKDIR" \
+  "/path/to/model.pth" \
+  "mamba_dev"
 ```
 
-**Expected input structure for `PROJECT_ROOT`:**
+**data 目录结构：**
 
 ```
-PROJECT_ROOT/
+data/
 ├── txt/
-│   ├── msms.txt
-│   └── Phospho (STY)Sites.txt   # Optional: skip Step8 if not present
+│   └── msms.txt
 └── mzml/
     ├── raw1.mzML
     └── raw2.mzML
 ```
 
-Output will be written to `PROJECT_ROOT/mambaflr/` (including `step7_flr_curve.csv`, `step8_phosphosites.csv`, etc.).
+输出将写入 `data/rescore/`，最终 mokapot 结果目录为 `data/rescore/mokapot/`。
+
+### 5) MS2Int_flr
+
+PTM site localization quality control pipeline based on target-decoy spectral similarity and False Localization Rate (FLR) estimation.
+
+
+**Data directory structure (`data/MS2Int_flr/`):**
+
+```
+data/MS2Int_flr/
+├── txt/
+│   ├── msms.txt                    # MaxQuant search results
+│   └── Phospho (STY)Sites.txt      # MaxQuant phosphosite table
+└── mzml/
+    └── raw1.mzML                   # Raw spectral data
+```
+
+**Run the full pipeline:**
+
+```sh
+bash MS2Int_FLR/run_pipeline.sh data/MS2Int_flr
+```
+
+**Output files (in `data/MS2Int_flr/output/`):**
+
+```
+output/
+├── unique_psm.csv       # Unique PSMs
+└── phosphosites.csv     # Final phosphosites at FLR cutoff
+```
 
 ### Model Weights & Data
 
@@ -256,7 +310,7 @@ This repository **does not directly provide large model weights and large datase
 
 **Environment / Dependencies**
 
-* **mamba-ssm / causal-conv1d build issues**: If compilation fails with `SSLEOFError` or network timeouts, repeat the pip install command - pip will auto-retry. 如果你需要 `causal-conv1d`（启用 Mamba2 fast path），建议按 [Installation](#installation) 的 Step 5 从源码编译安装（`CAUSAL_CONV1D_FORCE_BUILD=TRUE` + `--no-build-isolation`），避免预编译 wheel 与当前 torch ABI 不匹配；并注意它可能把 triton 拉回 3.3.0，Blackwell 需再安装 `triton==3.6.0`。也可以直接跳过 `causal-conv1d`（MS2Int 兼容 `use_mem_eff_path=False`）。
+* **mamba-ssm / causal-conv1d build issues**: If compilation fails with `SSLEOFError` or network timeouts, repeat the pip install command - pip will auto-retry. If you need `causal-conv1d` (to enable the Mamba2 fast path), it is recommended to compile and install from source following Step 5 in [Installation](#installation) (`CAUSAL_CONV1D_FORCE_BUILD=TRUE` + `--no-build-isolation`) to avoid ABI mismatch between prebuilt wheels and the current torch version. Also note it may pull triton back to 3.3.0; Blackwell requires reinstalling `triton==3.6.0`. You can also skip `causal-conv1d` entirely (MS2Int is compatible with `use_mem_eff_path=False`).
 
 * **Git safe.directory error**: If you see `fatal: detected dubious ownership in repository`, use `git -c safe.directory="$(pwd)"` prefix for fetch/checkout commands, or add the directory to git safe directories.
 
@@ -274,9 +328,6 @@ This repository **does not directly provide large model weights and large datase
 
 * **Out of Memory (OOM)**: Reduce batch size.
 
-**Docker**
-
-* **Building Docker image**: The Dockerfile uses `pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime` as base. Ensure `CUDA_HOME=/usr/local/cuda-12.8` is set during build if compiling from source.
 
 <p align="right">(<a href="#ms2int">back to top</a>)</p>
 
