@@ -253,7 +253,7 @@ bash "spectrum_processing/rescore/run_pipeline.sh" \
   "mamba_dev"
 ```
 
-**data 目录结构：**
+**Data directory structure:**
 
 ```
 data/
@@ -264,7 +264,7 @@ data/
     └── raw2.mzML
 ```
 
-输出将写入 `data/rescore/`，最终 mokapot 结果目录为 `data/rescore/mokapot/`。
+Output is written to `data/rescore/`; final mokapot results are in `data/rescore/mokapot/`.
 
 ### 5) MS2Int_flr
 
