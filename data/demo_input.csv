@@ -1,0 +1,5 @@
+Sequence,Length,Charge,collision_energy,Fragmentation
+PEPTIDEK,8,2,30,HCD
+ALLS[Phospho]LATHK,10,3,27,HCD
+[Acetyl]-M[Oxidation]AGLNK,6,2,30,CID
+C[Carbamidomethyl]DEFGHIK,8,2,25,HCD
