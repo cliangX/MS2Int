@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""
-DeepFLR4: FLR Visualization and Cutoff Selection
-===============================================
-This script calculates FLR (False Localization Rate) curves and provides cutoff selection
-for phosphosite localization quality control.
-
-Usage:
-    python DeepFLR4_FLR_visualization.py --modelresultfile modelresult_with_score.csv --sequencefile step1_target_decoy.csv --outputfile step4_FLRPSM.csv
-
-Original source: result_processing/step4_DeepFLR_FLR_visualization.py
-"""
+"""Compute FLR (False Localization Rate) curve from scored target/decoy candidates."""
 
 import pandas as pd
 import numpy as np
@@ -25,31 +15,11 @@ def ace(instance):
     return instance
 
 def main():
-    parser = argparse.ArgumentParser(description="Calculate FLR curves for phosphosite localization")
-    parser.add_argument(
-        "--modelresultfile",
-        type=str,
-        required=True,
-        help="Input file: modelresult from mgfprocess.py or DeepFLR2 output with scores"
-    )
-    parser.add_argument(
-        "--sequencefile", 
-        type=str,
-        required=True,
-        help="Input file: sequencefile from Targetdecoy_phosphopeptides_generation (step1_target_decoy.csv)"
-    )
-    parser.add_argument(
-        "--outputfile",
-        type=str,
-        default="step4_FLRPSM.csv",
-        help="Output file: FLR curve with cutoff, estimated FLR, and PSM counts"
-    )
-    parser.add_argument(
-        "--psm_outputfile",
-        type=str,
-        default="step7_unique_psm.csv",
-        help="Output file: unique PSM per spectrum with score and target/decoy label"
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--modelresultfile", type=str, required=True)
+    parser.add_argument("--sequencefile", type=str, required=True)
+    parser.add_argument("--outputfile", type=str, default="step4_FLRPSM.csv")
+    parser.add_argument("--psm_outputfile", type=str, default="step7_unique_psm.csv")
     
     args = parser.parse_args()
     
@@ -67,7 +37,6 @@ def main():
     # Standardize column names for sequencefile (as done in original Step4)
     df1.columns = ["SourceFile","Fspectrum","PP.Charge","exp_strip_sequence","Peptide","key_x"]
     
-    # 按 SourceFile + Fspectrum + PP.Charge + key_x 四个键精确对齐，避免不同电荷态混合
     df = pd.merge(df, df1, on=["SourceFile","Fspectrum","PP.Charge","key_x"])
     df = df[["SourceFile","Fspectrum","Peptide","PEP.StrippedSequence","key_x","score"]]
     
@@ -112,12 +81,11 @@ def main():
     df = pd.concat([zz, ww])
     df["deltascore"] = df["deltascore"].astype("float")
     
-    # 输出唯一 PSM 文件（包含 deltascore 和 is_target 标签）
     df["is_target"] = df["strip_key"] == df["PEP.StrippedSequence"]
     df[["SourceFile", "Fspectrum", "key_x", "PEP.StrippedSequence", "deltascore", "is_target"]].to_csv(
         args.psm_outputfile, index=False
     )
-    print(f"  唯一 PSM 输出: {len(df)} 条记录 -> {args.psm_outputfile}")
+    print(f"Unique PSMs: {len(df)} -> {args.psm_outputfile}")
     
     # Initialize FLR calculation
     out = pd.DataFrame(columns=["cutoff","esti_FLR","PSMs"])

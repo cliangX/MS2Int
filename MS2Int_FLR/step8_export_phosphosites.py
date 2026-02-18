@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""
-DeepFLR5: Phosphosite Export and Localization
-=============================================
-This script exports phosphorylation site localization results based on the selected FLR cutoff
-from DeepFLR4 analysis.
-
-Usage:
-    python DeepFLR5_phosphosite_export.py --modelresultfile modelresult_with_score.csv --sequencefile step1_target_decoy.csv --inputfile1 msms.txt --inputfile2 Phospho_STY_Sites.txt --cutoff 0.02 --outputresult step5_phosphosites.csv
-
-Original source: result_processing/step5_DeepFLR_result_processing.py
-"""
+"""Export phosphosite localization results filtered by FLR cutoff."""
 
 import pandas as pd
 import numpy as np
@@ -26,43 +16,13 @@ def ace(instance):
     return instance
 
 def main():
-    parser = argparse.ArgumentParser(description="Export phosphosite localization results based on FLR cutoff")
-    parser.add_argument(
-        "--modelresultfile",
-        type=str,
-        required=True,
-        help="Input file: modelresult from mgfprocess.py or DeepFLR2 output with scores"
-    )
-    parser.add_argument(
-        "--sequencefile",
-        type=str,
-        required=True,
-        help="Input file: sequencefile from Targetdecoy_phosphopeptides_generation (step1_target_decoy.csv)"
-    )
-    parser.add_argument(
-        "--outputresult",
-        type=str,
-        default="step5_phosphosites.csv",
-        help="Output file: phosphosites localized by DeepFLR for target FLR"
-    )
-    parser.add_argument(
-        "--cutoff",
-        type=float,
-        required=True,
-        help="Cutoff for estimated FLR (delta score threshold)"
-    )
-    parser.add_argument(
-        "--inputfile1",
-        type=str,
-        required=True,
-        help="Input file: MaxQuant searching result (msms.txt)"
-    )
-    parser.add_argument(
-        "--inputfile2", 
-        type=str,
-        required=True,
-        help="Input file: MaxQuant phosphosite result (Phospho (STY)Sites.txt)"
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--modelresultfile", type=str, required=True)
+    parser.add_argument("--sequencefile", type=str, required=True)
+    parser.add_argument("--outputresult", type=str, default="step5_phosphosites.csv")
+    parser.add_argument("--cutoff", type=float, required=True)
+    parser.add_argument("--inputfile1", type=str, required=True)
+    parser.add_argument("--inputfile2", type=str, required=True)
     
     args = parser.parse_args()
     
@@ -162,15 +122,12 @@ def main():
     
     # Read MaxQuant results
     dfmsms = pd.read_csv(args.inputfile1, delimiter="\t")
-    # 自动识别磷酸化位点 ID 列，兼容 Phospho(STY)/Phospho(Y)/Phospho(XXXX) 命名
     phospho_site_cols = [
         c for c in dfmsms.columns
         if re.match(r'^Phospho\s*\(.+\)\s*site IDs$', str(c))
     ]
     if len(phospho_site_cols) == 0:
-        raise ValueError(
-            f"未在 msms.txt 中找到类似 'Phospho(XXXX) site IDs' 的列，当前列名包括：{list(dfmsms.columns)}"
-        )
+        raise ValueError(f"No 'Phospho(...) site IDs' column found in msms.txt")
     phospho_site_col = phospho_site_cols[0]
 
     dfmsms = dfmsms[['Raw file', 'Scan number',  'Sequence',  'Modified sequence', 'Charge',
@@ -178,7 +135,6 @@ def main():
     dfmsms.columns = ['SourceFile', 'Spectrum',  'striptrue',  'Peptide', 'PP.Charge',
                       'MSMS_ID', 'Peptide ID', 'Mod. peptide ID', 'Evidence ID', 'Phospho_site_IDs']
     
-    # 统一 SourceFile 为 rawX 字符串，保证与 MaxQuant 结果匹配
     dfmodel["SourceFile"] = dfmodel["SourceFile"].astype(str)
     if dfmodel["SourceFile"].str.fullmatch(r"\d+").all():
         dfmodel["SourceFile"] = "raw" + dfmodel["SourceFile"]
@@ -193,15 +149,12 @@ def main():
     
     # Read MaxQuant phosphosite data
     df1 = pd.read_table(args.inputfile2, delimiter="\t")
-    # 自动识别磷酸化概率列，兼容 Phospho(STY)/Phospho(Y)/Phospho(XXXX) 命名
     phospho_prob_cols = [
         c for c in df1.columns
         if re.match(r'^Phospho\s*\(.+\)\s*Probabilities$', str(c))
     ]
     if len(phospho_prob_cols) == 0:
-        raise ValueError(
-            f"未在 Phospho_Sites 文件中找到类似 'Phospho(XXXX) Probabilities' 的列，当前列名包括：{list(df1.columns)}"
-        )
+        raise ValueError(f"No 'Phospho(...) Probabilities' column found in Sites file")
     phospho_prob_col = phospho_prob_cols[0]
 
     df1 = df1[['Proteins', 'Positions within proteins', 'Leading proteins', 'Protein',
@@ -211,12 +164,10 @@ def main():
                    'Phospho_Probabilities', 'Position in peptide', 'Positions', 'Position',
                    'MS/MS IDs', 'Best localization MS/MS ID', 'Best score scan number', "Phossite_IDs_maxq"]
     
-    # 从 Phospho_Probabilities 提取纯序列用于匹配（去除磷酸化标记）
     df1["striptrue_sites"] = df1["Phospho_Probabilities"].str.replace("(", "", regex=False)
     df1["striptrue_sites"] = df1["striptrue_sites"].str.replace(")", "", regex=False)
     df1["striptrue_sites"] = df1["striptrue_sites"].str.replace(r"(\d+\.*\d*)", "", regex=True)
     
-    # 通过 (序列 + 磷酸化位置) 组合匹配 Phospho Sites 表，避免跨 raw 文件的错误匹配
     df1["Position in peptide"] = df1["Position in peptide"].astype(int)
     df = pd.merge(
         df, df1,
@@ -238,7 +189,6 @@ def main():
             position_protein_model = int(position_delta) + int(position_protein)
             df.loc[k,"position_protein_model"] = position_protein_model
     
-    # 过滤掉未匹配到 Phospho Sites 的行
     df = df.dropna(subset=["Protein"])
     
     # Prepare final output
@@ -250,14 +200,10 @@ def main():
     df = df.drop_duplicates(keep="first")
     df.reset_index(drop=True, inplace=True)
     
-    # 创建蛋白位点标识（向量化，避免 apply 返回多列导致赋值报错）
     def _fmt_pos(v):
         if pd.isna(v):
             return "na"
-        try:
-            return str(int(v))
-        except Exception:
-            return "na"
+        return str(int(v))
 
     df["model_proteinsite"] = df["Protein"].astype(str) + "_" + df["position_protein_model"].apply(_fmt_pos)
     
@@ -266,7 +212,7 @@ def main():
     df = df.loc[~df["Protein"].str.contains("CON__")]
     
     df.to_csv(args.outputresult, index=False)
-    print(f"磷酸化位点: {len(df)}")
+    print(f"Phosphosites: {len(df)}")
 
 if __name__ == "__main__":
     main()
