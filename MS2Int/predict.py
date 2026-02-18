@@ -1,85 +1,78 @@
-# %%
-# 用户自定义参数配置
-# ==================================================
-# GPU设置
-"""
-python predict.py \
-  --ckpt "checkpoints/model.pth" \
-  --input "data/input.h5" \
-  --output "outputs/pred.h5"
-"""
-
-gpu_id = "0"  # 使用的GPU ID，例如："0"、"1"或"0,1"表示使用多个GPU
-
-
-# 模型路径
-# 模型路径通过命令行传参
+import atexit
 import argparse
-
-parser = argparse.ArgumentParser(description="Spectrum prediction")
-parser.add_argument(
-    "--checkpoint_path",
-    "--ckpt",
-    dest="checkpoint_path",
-    required=True,
-    help="模型检查点路径(.pth)",
-)
-parser.add_argument(
-    "--input_path", "--input", dest="input_path", required=True, help="输入数据HDF5路径"
-)
-parser.add_argument(
-    "--output_path",
-    "--output",
-    dest="output_path",
-    required=True,
-    help="输出结果HDF5路径",
-)
-args = parser.parse_args()
-checkpoint_path = args.checkpoint_path
-input_path = args.input_path
-output_path = args.output_path
-# 批处理大小
-batch_size = 1024
-
-# 其他参数
-num_workers = 8  # 数据加载线程数
-# ==================================================
-
-# %%
-import torch
-
-print(torch.cuda.is_available())
-
-# %%
 import os
-
-# 设置当前使用的GPU
-os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
-
-# %%
-# 标准库
-import os
+import tempfile
 
 import h5py
 import numpy as np
+import pandas as pd
 import torch
-import torch.nn.functional as F
-from datasets import CustomDataset
-
-# 这里保持原有导入不变
-from mamba_ssm.models.config_mamba import MambaConfig
-
-# 不再需要添加模型路径，因为已经将文件复制到当前目录
-from model import MambaLMHeadModel
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
+
+from mamba_ssm.models.config_mamba import MambaConfig
+from model import MambaLMHeadModel
+from datasets import CustomDataset
 from utils import *
 
-# %%
+parser = argparse.ArgumentParser(description="Spectrum prediction")
+parser.add_argument("--checkpoint_path", "--ckpt", dest="checkpoint_path",
+                    required=True, help="Model checkpoint path (.pth)")
+parser.add_argument("--input_path", "--input", dest="input_path",
+                    required=True, help="Input file path (.h5, .csv, or .tsv)")
+parser.add_argument("--output_path", "--output", dest="output_path",
+                    required=True, help="Output HDF5 path")
+args = parser.parse_args()
+
+REQUIRED_COLS = ["Sequence", "Length", "Charge", "collision_energy", "Fragmentation"]
+
+
+def _csv_to_h5(csv_path: str, h5_path: str) -> None:
+    sep = "\t" if os.path.splitext(csv_path)[1].lower() == ".tsv" else ","
+    df = pd.read_csv(csv_path, sep=sep)
+    missing = [c for c in REQUIRED_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Input CSV/TSV missing required columns: {missing}")
+    with h5py.File(h5_path, "w") as f:
+        f.create_dataset(
+            "Sequence",
+            data=df["Sequence"].astype(str).str.encode("utf-8").values.astype("S128"),
+        )
+        f.create_dataset("Length", data=df["Length"].values.astype(np.int32))
+        f.create_dataset("Charge", data=df["Charge"].values.astype(np.int32))
+        f.create_dataset("collision_energy", data=df["collision_energy"].values.astype(np.int32))
+        f.create_dataset(
+            "Fragmentation",
+            data=df["Fragmentation"].astype(str).str.encode("utf-8").values.astype("S10"),
+        )
+    print(f"Converted {csv_path} -> {h5_path} ({len(df)} samples)")
+
+
+checkpoint_path = args.checkpoint_path
+raw_input_path = args.input_path
+output_path = args.output_path
+
+_tmp_h5 = None
+ext = os.path.splitext(raw_input_path)[1].lower()
+if ext in (".csv", ".tsv"):
+    _tmp_h5 = tempfile.NamedTemporaryFile(suffix=".h5", delete=False)
+    _tmp_h5.close()
+    _csv_to_h5(raw_input_path, _tmp_h5.name)
+    input_path = _tmp_h5.name
+    atexit.register(lambda: os.path.exists(_tmp_h5.name) and os.remove(_tmp_h5.name))
+else:
+    input_path = raw_input_path
+
+batch_size = 1024
+num_workers = 8
+gpu_id = "0"
+
+os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+
 Mamba_Config = MambaConfig(
     d_model=512,
     d_intermediate=0,
-    n_layer=4,  # 修改为训练时的层数
+    n_layer=4,
     ssm_cfg={"layer": "Mamba2"},
     attn_layer_idx=[],
     attn_cfg={},
@@ -89,19 +82,11 @@ Mamba_Config = MambaConfig(
     tie_embeddings=True,
 )
 
-# %%
-device = "cuda:0"  # 直接使用GPU
+device = "cuda:0"
 
-
-# load_checkpoint 已移至 utils.py
-
-# 用相同的模型架构初始化你的模型
 model = MambaLMHeadModel(Mamba_Config)
 epoch, val_loss = load_checkpoint(checkpoint_path, model)
 model = model.to(device)
-
-
-# create_batch_loss_masks 和 masked_spectral_distance 已移至 utils.py
 
 
 def test(model, test_loader, device):
@@ -111,7 +96,6 @@ def test(model, test_loader, device):
 
     with torch.inference_mode():
         for batch in test_progress:
-            # 只将必要张量搬到 GPU，lengths 留在 CPU
             inst, charge, ce, seq, lengths = batch
             inst = inst.to(device, non_blocking=True)
             charge = charge.to(device, non_blocking=True)
@@ -119,13 +103,9 @@ def test(model, test_loader, device):
             seq = seq.to(device, non_blocking=True)
 
             outputs = model(inst, charge, ce, seq)
-            # 使用 CPU 端 lengths 构造掩码，再搬到 GPU
-            masks = create_batch_loss_masks(lengths.tolist()).to(
-                device, non_blocking=True
-            )
+            masks = create_batch_loss_masks(lengths.tolist()).to(device, non_blocking=True)
             outputs[outputs < 0] = 0
             outputs = outputs * masks
-
             all_y_outputs.append(outputs.cpu())
 
     all_y_outputs = torch.cat(all_y_outputs, dim=0)
@@ -133,47 +113,60 @@ def test(model, test_loader, device):
     return all_y_outputs
 
 
-# %%
-# 确保输出目录存在
-os.makedirs(os.path.dirname(output_path), exist_ok=True)
+output_dir = os.path.dirname(output_path)
+if output_dir:
+    os.makedirs(output_dir, exist_ok=True)
 
-# 添加的肽段长度过滤代码
-print("正在读取肽段长度信息...")
 with h5py.File(input_path, "r") as f:
-    lengths = f["Length"][:]
-    total_samples = len(lengths)
+    length_ds = f["Length"]
+    seq_ds = f.get("Sequence", None)
+    total_samples = int(length_ds.shape[0])
 
-    # 创建符合条件的样本索引列表（长度<=30的肽段）
-    valid_indices = [i for i in range(total_samples) if lengths[i] <= 30]
-    filtered_count = total_samples - len(valid_indices)
+    # 训练/推理统一过滤策略：Length<=30 且序列不包含 'U'
+    chunk_size = 200_000
+    valid_indices = []
+    filtered_by_length = 0
+    filtered_by_u = 0
 
-    print(f"总样本数: {total_samples}")
+    if seq_ds is None:
+        print("Warning: 输入 H5 缺少 Sequence 数据集，无法执行去U过滤（仅做 Length<=30 过滤）")
+
+    for start in range(0, total_samples, chunk_size):
+        end = min(start + chunk_size, total_samples)
+        lengths = np.asarray(length_ds[start:end])
+        is_len_ok = lengths <= 30
+
+        if seq_ds is None:
+            no_u = np.ones_like(is_len_ok, dtype=bool)
+        else:
+            seq_chunk = np.asarray(seq_ds[start:end])
+            if seq_chunk.dtype.kind == "O":
+                # 兼容可变长字符串/bytes：转成 bytes 固定长度再做矢量化查找
+                seq_chunk = seq_chunk.astype("S")
+
+            if seq_chunk.dtype.kind in ("S", "a"):
+                no_u = np.char.find(seq_chunk, b"U") == -1
+            else:
+                no_u = np.char.find(seq_chunk, "U") == -1
+
+        is_ok = is_len_ok & no_u
+        filtered_by_length += int((~is_len_ok).sum())
+        filtered_by_u += int((is_len_ok & ~no_u).sum())
+        valid_indices.extend((np.nonzero(is_ok)[0] + start).tolist())
+
     print(
-        f"长度>30的样本数: {filtered_count} ({filtered_count / total_samples * 100:.2f}%)"
+        f"Samples: {len(valid_indices)}/{total_samples} "
+        f"(filtered length>30: {filtered_by_length}, filtered U: {filtered_by_u})"
     )
-    print(f"过滤后的样本数: {len(valid_indices)}")
 
-# 实例化原始数据集（推理阶段不需要 train_data，避免额外 I/O）
 original_dataset = CustomDataset(input_path, include_train=False)
-
-# 创建过滤后的子集
 filtered_dataset = Subset(original_dataset, valid_indices)
-
-# 用过滤后的数据集创建DataLoader
 test_loader = DataLoader(
     filtered_dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=True
 )
 
-# %%
-# 进行推理
-print("开始进行模型推理...")
 all_y_outputs = test(model, test_loader, device)
 
-# %%
-# 保存结果 - 不仅保存预测结果，还保留原始数据的所有键
-# 修改这里：对所有字段都应用相同的过滤
-print("保存结果到h5文件...")
-# 构建与原始样本数一致的全长预测矩阵，未参与预测的位置填 0
 with h5py.File(input_path, "r") as f_in:
     total_samples = f_in["Length"].shape[0]
 
@@ -182,15 +175,12 @@ full_pred = np.zeros(
 )
 full_pred[valid_indices] = all_y_outputs.numpy()
 
-# 若输出路径与输入路径相同，则直接在原文件中追加/覆盖 Intpredict 数据集
 if os.path.abspath(output_path) == os.path.abspath(input_path):
-    print("输出路径与输入路径相同，将在原 H5 文件中追加 Intpredict 数据集。")
     with h5py.File(input_path, "a") as f:
         if "Intpredict" in f:
             del f["Intpredict"]
         f.create_dataset("Intpredict", data=full_pred)
 else:
-    # 否则保持原有行为：新建输出文件，复制所有原始字段，再写入 Intpredict
     with (
         h5py.File(input_path, "r") as input_file,
         h5py.File(output_path, "w") as output_file,
@@ -205,78 +195,3 @@ else:
                 ]
 
         output_file.create_dataset("Intpredict", data=full_pred)
-    # output_file.create_dataset('Intpredict_loss', data=test_losses)
-# %%
-# 删除输入文件 - 已禁用，保留输入文件以便重复运行
-# if os.path.exists(input_path):
-#     os.remove(input_path)
-
-
-# %%
-# 查看结果文件结构
-# print("\n结果文件结构:")
-# with h5py.File(output_path, 'r') as f:
-#
-# ("文件中的键:", list(f.keys()))
-# for key in f.keys():
-# dataset = f[key]
-# print(f"键: {key}, 形状: {dataset.shape}, 数据类型: {dataset.dtype}")
-# if 'description' in dataset.attrs:
-# print(f"  描述: {dataset.attrs['description']}")
-
-# # %%
-# 查看第一条数据
-# print("\n第一条数据信息:")
-# with h5py.File(output_path, 'r') as f:
-# for key in f.keys():
-# try:
-# if key == 'train_data' or key == 'Intpredict':
-# print(f"{key}: 形状为 {f[key][0].shape}")
-# elif f[key].dtype.kind == 'S' or f[key].dtype.kind == 'O':
-# try:
-# value = f[key][0]
-# if isinstance(value, bytes):
-# print(f"{key}: {value.decode('utf-8')}")
-# else:
-# print(f"{key}: {value}")
-# except:
-# print(f"{key}: [无法解码]")
-# else:
-# print(f"{key}: {f[key][0]}")
-# except Exception as e:
-# print(f"{key}: 无法显示 - {str(e)}")
-
-
-# 读取loss数据
-# with h5py.File(output_path, 'r') as f:
-# if 'Intpredict_loss' in f:
-# losses = f['Intpredict_loss'][:]
-
-#         # 计算统计数据
-# print(f"Loss统计信息:")
-# print(f"样本数量: {len(losses)}")
-# print(f"平均值: {np.mean(losses):.4f}")
-# print(f"中位数: {np.median(losses):.4f}")
-# print(f"标准差: {np.std(losses):.4f}")
-# print(f"最小值: {np.min(losses):.4f}")
-# print(f"最大值: {np.max(losses):.4f}")
-
-#         # 计算分位数
-# percentiles = [10, 25, 50, 75, 90, 95, 99]
-# print("\nLoss分位数:")
-# for p in percentiles:
-# value = np.percentile(losses, p)
-# print(f"{p}%: {value:.4f}")
-
-#         # 统计不同范围内的loss分布
-# ranges = [(0, 0.1), (0.1, 0.2), (0.2, 0.3), (0.3, 0.4), (0.4, 0.5), (0.5, 1.0), (1.0, float('inf'))]
-# print("\nLoss分布:")
-# for low, high in ranges:
-# count = np.sum((losses >= low) & (losses < high))
-# percentage = count / len(losses) * 100
-# print(f"{low:.1f} - {high if high != float('inf') else '∞'}: {count} 个样本 ({percentage:.2f}%)")
-# else:
-# print("找不到'Intpredict_loss'数据集")
-
-#
-#

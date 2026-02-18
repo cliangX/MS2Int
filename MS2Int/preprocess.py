@@ -32,13 +32,6 @@ def tokenize_peptide(seq: str):
     return tokens
 
 def data_read(h5_or_path, idx, include_train: bool = True):
-    """Read one sample from HDF5 and convert to tensors.
-
-    If h5_or_path is a string, open/close the file for this call.
-    If it's an h5py.File handle, reuse it (no open/close here).
-
-    When include_train=False, skip reading 'train_data' to save I/O for inference.
-    """
     need_close = False
     if isinstance(h5_or_path, str):
         f = h5py.File(h5_or_path, 'r')
@@ -47,7 +40,6 @@ def data_read(h5_or_path, idx, include_train: bool = True):
         f = h5_or_path
 
     try:
-        # 优先使用 ProForma 风格的 annotate 序列（包含 [Phospho] 等修饰）
         if "annotate" in f:
             Sequence = f["annotate"][idx : idx + 1]
         else:
@@ -126,19 +118,15 @@ def data_read(h5_or_path, idx, include_train: bool = True):
         "K[UNIMOD:747]": 45,
     }
     instruments = ["HCD", "CID"]
-    charges = list(range(1, 7))  # 1 到 6
-    collision_energies = list([10,20,23,25,26,27,28,29,30,35,40,42])  # 10 到 50
+    charges = list(range(1, 7))
+    collision_energies = [10, 20, 23, 25, 26, 27, 28, 29, 30, 35, 40, 42]
 
-    # 为每种类型创建字典，映射每个值到一个索引
     instrument_to_idx = {inst: idx for idx, inst in enumerate(instruments)}
     charge_to_idx = {charge: idx for idx, charge in enumerate(charges)}
     collision_energy_to_idx = {ce: idx for idx, ce in enumerate(collision_energies)}
-    # 创建氨基酸序列索引映射
-    aa_to_idx = {key: idx + 1 for idx, key in enumerate(AA)}  # +1 因为0是填充索引
+    aa_to_idx = {key: idx + 1 for idx, key in enumerate(AA)}
 
-
-    # 使用前面定义的索引字典将输入转换为Tensor
-    max_seq_length = 30  # 定义最大序列长度
+    max_seq_length = 30
     Length = torch.tensor(Length)
     tokens_list = [tokenize_peptide(seq) for seq in Sequence]
     encoded = [[aa_to_idx.get(tok, 0) for tok in tokens] for tokens in tokens_list]
@@ -149,15 +137,6 @@ def data_read(h5_or_path, idx, include_train: bool = True):
     instrument_tensor = torch.tensor([instrument_to_idx.get(inst, 0) for inst in instrument])
     if train_data is not None:
         train_data = torch.tensor(train_data)
-
-    # 创建0和-1的张量，它们的形状与data在除了最后一个维度以外的维度相同
-    # zeros = torch.zeros(train_data.size(0), 1, train_data.size(2))  # 在最后一个维度添加1列0
-    # neg_ones = torch.full((train_data.size(0), 1, train_data.size(2)), 0)  # 在最后一个维度添加1列0
-
-    # 在第三维度最前面加一串0
-    #src_train_data = train_data
-
-    # 在第三维度最后面加一串-1
 
     instrument_tensor = torch.squeeze(instrument_tensor)
     charge_tensor = torch.squeeze(charge_tensor)

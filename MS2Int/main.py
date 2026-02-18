@@ -1,23 +1,20 @@
 import os
+import logging
+from datetime import datetime
 
 from hparams import get_hparams
 
 config = get_hparams()
 
 import setproctitle
-
 setproctitle.setproctitle(config.experiment_name)
-
-# 标准库
-import logging
 
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.utils.data import DataLoader, random_split
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 from tqdm import tqdm
-from datetime import datetime
 
 from model import MambaLMHeadModel
 from mamba_ssm.models.config_mamba import MambaConfig
@@ -40,19 +37,17 @@ from datasets import CustomDataset
 from vat import VATLoss
 
 
-# 确保日志与模型目录存在
 log_dir = os.path.dirname(config.log_path)
 if log_dir:
     os.makedirs(log_dir, exist_ok=True)
 if config.checkpoint_path:
     os.makedirs(config.checkpoint_path, exist_ok=True)
 
-# 配置日志级别和输出格式
 logging.basicConfig(
-    filename=config.log_path,  # 日志文件的路径
+    filename=config.log_path,
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    filemode="a",  # 追加模式
+    filemode="a",
 )
 
 
@@ -60,14 +55,12 @@ Mamba_Config = MambaConfig(
     d_model=config.d_model,
     d_intermediate=0,
     n_layer=config.n_layer,
-    # vocab_size=50277,
     ssm_cfg={"layer": "Mamba2"},
     attn_layer_idx=[],
     attn_cfg={},
     rms_norm=True,
     residual_in_fp32=True,
     fused_add_norm=True,
-    # pad_vocab_size_multiple=8,
     tie_embeddings=True,
 )
 
@@ -76,7 +69,6 @@ WORLD_SIZE = config.world_size
 
 
 def setup(rank, world_size):
-    # 分布式通信地址/端口：避免固定端口导致 EADDRINUSE（端口占用）
     os.environ["MASTER_ADDR"] = str(config.server)
     os.environ["MASTER_PORT"] = str(config.port)
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
@@ -93,12 +85,11 @@ def train(rank, world_size, Mamba_Config):
     model = MambaLMHeadModel(Mamba_Config).to(device)
     params_df = count_parameters(model)
     logging.info(params_df)
-    logging.info("----------------------------------------------")
     model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     vat_loss_fn = VATLoss(eps=config.vat_eps, xi=config.vat_xi, ip=config.vat_ip)
 
-    dataset = CustomDataset(config.train_data_pth)
+    dataset = CustomDataset(config.train_data_path)
     total_samples = len(dataset)
     train_size = int(config.train_data_size * total_samples)
     val_size = total_samples - train_size
@@ -136,7 +127,6 @@ def train(rank, world_size, Mamba_Config):
 
             base_pred = outputs.detach()
 
-            # 监督损失（与原始训练一致）
             outputs_sup = outputs * masks
             tgt_train_data = batch[-1] * masks
             y_outputs = outputs_sup.reshape(outputs_sup.size(0), -1)
@@ -146,7 +136,6 @@ def train(rank, world_size, Mamba_Config):
             batch_size = batch[0].size(0)
             sup_loss = sup_loss / batch_size
 
-            # VAT 损失（MSE 一致性约束）
             vat_loss = vat_loss_fn(model, batch[0], batch[1], batch[2], batch[3], masks, base_pred=base_pred)
             loss = sup_loss + config.vat_alpha * vat_loss
 
@@ -227,10 +216,7 @@ def save_checkpoint(rank, model, optimizer, epoch, val_loss, checkpoint_path):
             },
             os.path.join(checkpoint_path, f"model_epoch_{epoch}_val_loss_{val_loss:.4f}_{current_time}.pth"),
         )
-        logging.info(
-            f"""Checkpoint saved at epoch {epoch} with validation loss {val_loss:.4f}  
-                     ----------------------------------------------------------------------------------"""
-        )
+        logging.info(f"Checkpoint saved at epoch {epoch} with validation loss {val_loss:.4f}")
 
 
 if __name__ == "__main__":
