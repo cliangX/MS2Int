@@ -1,141 +1,121 @@
-#!/usr/bin/env markdown
-# Rescore（Mamba + 全特征，含 m 离子）
+# Rescore (Mamba + MS2PIP features with m-ion)
 
-本目录从 `/mnt/data_nas/lcy/project_MS2predict/5.tools/mamba_rescore` 抽取了 **“Mamba + 全特征”** 的重打分实现，目标是把 **Mamba 预测（Intpredict）** 与 **MS2PIP 特征 + OK 特征 + m 离子扩展（203维）** 组合起来，最终使用 **mokapot** 进行重打分。
+Mokapot rescoring pipeline using **Mamba predictions (Intpredict)** and **MS2PIP-style features (including m-ions)**.
 
-这里的“全特征”具体指：
-- **MS2PIP 风格特征（含 m 离子）**：`6m.calculator_ms2pip_feature_m.py`
-- **OK 特征（203维，含 m 离子）**：`7m.calculator_ok_feature_m.py` + `ok_cpm.py`
-- **Basic / MaxQuant 二阶段特征**：在 `10bm.rescore_mamba_with_ms2pip_ok_m.py` 中通过 `ms2rescore` 自动添加（默认开启）
+Phase 2 automatically adds **Basic / MaxQuant** features via `ms2rescore` (disable with `--no-basic` / `--no-maxquant`).
 
 ---
 
-## 📦 已抽取文件
+## Quick Start
 
-- `spectrum_processing/rescore/0.filter_msms_30_unmodified.py`：过滤 MaxQuant `msms.txt`（Unmodified + Length<=30 + 去掉含 U 的序列）
-- `spectrum_processing/rescore/1.make_msms_specid.py`：生成 `msms_specid.tsv`（按 Raw file/Scan number/Sequence/Charge 拼 `SpecId`）
-- `spectrum_processing/rescore/5.add_SpecId_2_h5.py`：为 H5 写入 `SpecId` 数据集（供后续按 SpecId 对齐）
-- `spectrum_processing/rescore/6m.calculator_ms2pip_feature_m.py`：计算 MS2PIP 风格特征（**含 m 离子**）
-- `spectrum_processing/rescore/7m.calculator_ok_feature_m.py`：计算 OK 特征（**203维含 m 离子**），并输出“合并版 TSV”
-- `spectrum_processing/rescore/10bm.rescore_mamba_with_ms2pip_ok_m.py`：使用 mokapot 进行重打分（读取“合并版 TSV”）
-- `spectrum_processing/rescore/ok_cpm.py`：OK 特征计算核心实现
+```bash
+bash spectrum_processing/rescore/run_pipeline.sh \
+  "/path/to/WORKDIR" \
+  "/path/to/model.pth" \
+  "mamba_dev"
+```
+
+Output: `WORKDIR/rescore/mokapot/`
 
 ---
 
-## ✅ 输入/输出约定
+## Scripts
 
-### 输入（工作目录 WORKDIR）
+- **step01_filter_msms_unmodified_len30.py** — Filter msms.txt (Unmodified, Length<=30, no selenocysteine)
+- **step02_make_msms_specid.py** — Generate SpecId TSV from Raw file / Scan number / Sequence / Charge
+- **step03_calc_ms2pip_features_m.py** — Compute MS2PIP features (with m-ions; auto-generates SpecId if missing)
+- **step04_rescore_mamba_ms2pip_m.py** — Two-stage mokapot rescoring (Phase 2 adds Basic/MaxQuant by default)
+- **run_pipeline.sh** — End-to-end pipeline wrapper
+- **add_specid_to_h5.py** — Standalone SpecId writer for H5 (usually not needed; step03 handles this)
 
-WORKDIR 需要包含：
+---
+
+## Input / Output
+
+### Input (WORKDIR)
+
 ```
 WORKDIR/
-├── txt/
-│   └── msms.txt
-└── mzml/
-    ├── *.mzML
-    └── ...
+  txt/msms.txt
+  mzml/*.mzML
 ```
 
-### 中间/输出（写入 WORKDIR/rescore/）
+### Output (WORKDIR/rescore/)
 
-主要产物：
-- `rescore/1.msms_filtered_unmodified_lenle30.txt`
-- `rescore/msms_specid.tsv`
-- `rescore/rescore_batch1.h5`（由 `spectrum_processing/unmodficaiton/run.py` 生成）
-- `rescore/rescore.h5`（由 `MS2Int/predict.py` 写入 `Intpredict`）
-- `rescore/msms_specid_with_MS2PIP_m.tsv`
-- `rescore/msms_specid_with_ms2pip_ok_m.tsv`（**最终用于 mokapot 的“全特征合并版”**）
+- `1.msms_filtered_unmodified_lenle30.txt`
+- `msms_specid.tsv`
+- `rescore_batch1.h5` (from `spectrum_processing/unmodficaiton/run.py`)
+- `rescore.h5` (with `Intpredict` from `MS2Int/predict.py`)
+- `.features_tmp*/` (temporary; auto-cleaned by pipeline)
+- `mokapot/mokapot.psms.txt`
+- `mokapot/mokapot.peptides.txt`
 
 ---
 
-## 🚀 推荐运行流程（手动分步）
+## Manual Step-by-Step
 
-下面示例默认你在 MS2Int 仓库根目录运行（`/mnt/data_nas/lcy/project_MS2predict/5.tools/MS2Int`），并且使用 conda 环境 `mamba_dev`。
+Run from the MS2Int repo root with conda env `mamba_dev`.
 
-1) 过滤 `msms.txt`
+1) Filter msms.txt
 ```bash
-conda run -n "mamba_dev" python "spectrum_processing/rescore/0.filter_msms_30_unmodified.py" \
-  -i "/path/to/WORKDIR/txt/msms.txt" \
-  -o "/path/to/WORKDIR/rescore/1.msms_filtered_unmodified_lenle30.txt"
+conda run -n mamba_dev python spectrum_processing/rescore/step01_filter_msms_unmodified_len30.py \
+  -i /path/to/WORKDIR/txt/msms.txt \
+  -o /path/to/WORKDIR/rescore/1.msms_filtered_unmodified_lenle30.txt
 ```
 
-2) 生成 `msms_specid.tsv`
+2) Generate SpecId TSV
 ```bash
-conda run -n "mamba_dev" python "spectrum_processing/rescore/1.make_msms_specid.py" \
-  "/path/to/WORKDIR/rescore/1.msms_filtered_unmodified_lenle30.txt" \
-  "/path/to/WORKDIR/rescore/msms_specid.tsv"
+conda run -n mamba_dev python spectrum_processing/rescore/step02_make_msms_specid.py \
+  /path/to/WORKDIR/rescore/1.msms_filtered_unmodified_lenle30.txt \
+  /path/to/WORKDIR/rescore/msms_specid.tsv
 ```
 
-3) 制作 H5（真实谱图 + train_data）
+3) Build H5 (observed spectra + train_data)
 ```bash
-cd "/path/to/WORKDIR"
-conda run -n "mamba_dev" python "/mnt/data_nas/lcy/project_MS2predict/5.tools/MS2Int/spectrum_processing/unmodficaiton/run.py" \
-  --msms "rescore/1.msms_filtered_unmodified_lenle30.txt" \
-  --mzml-dir "mzml" \
-  --dataset-name "rescore" \
-  --output-dir "rescore" \
-  --final-h5 "rescore/rescore_batch1.h5"
+cd /path/to/WORKDIR
+conda run -n mamba_dev python /path/to/MS2Int/spectrum_processing/unmodficaiton/run.py \
+  --msms rescore/1.msms_filtered_unmodified_lenle30.txt \
+  --mzml-dir mzml \
+  --dataset-name rescore \
+  --output rescore/rescore_batch1.h5
 ```
 
-4) 运行 MS2Int 推理（写入 `Intpredict`）
+4) MS2Int prediction (writes Intpredict)
 ```bash
-cd "/path/to/WORKDIR"
-conda run -n "mamba_dev" python "/mnt/data_nas/lcy/project_MS2predict/5.tools/MS2Int/MS2Int/predict.py" \
-  --ckpt "/path/to/model.pth" \
-  --input "rescore/rescore_batch1.h5" \
-  --output "rescore/rescore.h5"
+cd /path/to/WORKDIR
+conda run -n mamba_dev python /path/to/MS2Int/MS2Int/predict.py \
+  --ckpt /path/to/model.pth \
+  --input rescore/rescore_batch1.h5 \
+  --output rescore/rescore.h5
 ```
 
-5) 为 `rescore.h5` 写入 `SpecId`
+5) Compute MS2PIP features (with m-ions)
 ```bash
-cd "/path/to/WORKDIR"
-conda run -n "mamba_dev" python "/mnt/data_nas/lcy/project_MS2predict/5.tools/MS2Int/spectrum_processing/rescore/5.add_SpecId_2_h5.py" \
-  --h5_path "rescore/rescore.h5"
+cd /path/to/WORKDIR
+conda run -n mamba_dev python /path/to/MS2Int/spectrum_processing/rescore/step03_calc_ms2pip_features_m.py \
+  --h5_path rescore/rescore.h5 \
+  --tsv_path rescore/msms_specid.tsv \
+  --output rescore/.features_tmp/ms2pip_features_m.tsv
 ```
 
-6) 计算 MS2PIP 特征（含 m 离子）
+6) Mokapot rescoring
 ```bash
-cd "/path/to/WORKDIR"
-conda run -n "mamba_dev" python "/mnt/data_nas/lcy/project_MS2predict/5.tools/MS2Int/spectrum_processing/rescore/6m.calculator_ms2pip_feature_m.py" \
-  --h5_path "rescore/rescore.h5" \
-  --tsv_path "rescore/msms_specid.tsv" \
-  --output "rescore/msms_specid_with_MS2PIP_m.tsv"
+cd /path/to/WORKDIR
+conda run -n mamba_dev python /path/to/MS2Int/spectrum_processing/rescore/step04_rescore_mamba_ms2pip_m.py \
+  --msms_path rescore/1.msms_filtered_unmodified_lenle30.txt \
+  --tsv_path rescore/.features_tmp/ms2pip_features_m.tsv \
+  --rng 42 --folds 2 --max_workers 2 -v
 ```
-
-7) 计算 OK 特征（203维含 m 离子）并生成“合并版 TSV”
-```bash
-cd "/path/to/WORKDIR"
-conda run -n "mamba_dev" python "/mnt/data_nas/lcy/project_MS2predict/5.tools/MS2Int/spectrum_processing/rescore/7m.calculator_ok_feature_m.py" \
-  --h5_path "rescore/rescore.h5" \
-  --tsv_path "rescore/msms_specid_with_MS2PIP_m.tsv" \
-  --output "rescore/msms_specid_with_ms2pip_ok_m.tsv"
-```
-
-8) mokapot 重打分（Mamba + 全特征）
-```bash
-cd "/path/to/WORKDIR"
-conda run -n "mamba_dev" python "/mnt/data_nas/lcy/project_MS2predict/5.tools/MS2Int/spectrum_processing/rescore/10bm.rescore_mamba_with_ms2pip_ok_m.py" \
-  --msms_path "rescore/1.msms_filtered_unmodified_lenle30.txt" \
-  --tsv_path "rescore/msms_specid_with_ms2pip_ok_m.tsv" \
-  --rng 42 --folds 2 --max_workers 2 \
-  --log_path "rescore/logs/rescore.log" \
-  -v
-```
-
-输出目录默认在：
-`WORKDIR/rescore/rescore_mamba_ok_m/`
 
 ---
 
-## 🧩 依赖说明
+## Dependencies
 
-除 MS2Int 本身依赖外，本流程额外需要：
+In addition to MS2Int requirements:
 - `mokapot`
 - `ms2rescore`
 - `psm-utils`
 
-如果环境缺包，建议在 `mamba_dev` 中安装（示例）：
 ```bash
-conda run -n "mamba_dev" python -m pip install --no-cache-dir mokapot ms2rescore psm-utils
+conda run -n mamba_dev pip install mokapot ms2rescore psm-utils
 ```
-
