@@ -2,20 +2,32 @@ import gc
 import multiprocessing as mp
 import multiprocessing.dummy as mp_thread
 import os
+import re
 import warnings
 from functools import lru_cache
+from itertools import repeat
+
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 import numpy as np
 import pandas as pd
-import pyopenms as oms
-from spectrum_utils import fragment_annotation, proforma
+
+try:
+    import pyopenms as oms  # type: ignore
+except Exception:
+    oms = None  # type: ignore
+
+try:
+    from spectrum_utils import fragment_annotation, proforma  # type: ignore
+except Exception:
+    fragment_annotation = None  # type: ignore
+    proforma = None  # type: ignore
 from tqdm import tqdm
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.filterwarnings("ignore", category=pd.errors.DtypeWarning)
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
-# 定义全局修饰转换字典
 mod_transform = {
     r"(Oxidation (M))": "[Oxidation]",
     r"(Acetyl (Protein N-term))": "[Acetyl]-",
@@ -25,49 +37,171 @@ mod_transform = {
     "C": "C[Carbamidomethyl]",
     r"(de)": "[Deamidated]",
     "_": "",
+    r"(Phospho (STY))": "[Phospho]",
+    r"(Phospho(Y))": "[Phospho]",
+    r"(Phospho (Y))": "[Phospho]",
 }
 
 
-# 将函数移到外部
 def apply_modifications(sequence):
+    if not isinstance(sequence, str):
+        sequence = str(sequence)
     for key, value in mod_transform.items():
         sequence = sequence.replace(key, value)
     return sequence
 
 
-# 全局缓存函数（在每个进程中独立缓存）
-@lru_cache(maxsize=15)
-def cached_process_single(annotate):
-    """带缓存的单个序列处理"""
-    seq = proforma.parse(annotate)
+def generate_theoretical_fragments(annotate, mode: str):
+    """按模式生成理论碎片。
+
+    - unmodified：保持原有 byIm/max_charge=2，并过滤掉带电 m 离子（包含 'm' 且包含 '^'）。
+    - phospho：在 byIm/max_charge=2 基础上增加 H3PO4 中性丢失，并仅保留覆盖磷酸化位点的 -H3PO4 碎片。
+    """
+    if proforma is None or fragment_annotation is None:
+        raise ImportError("缺少依赖：spectrum_utils（用于生成理论碎片）")
+
+    mode = str(mode or "unmodified").strip().lower()
+    annotate = str(annotate)
+
+    try:
+        seq = proforma.parse(annotate)
+    except Exception as e:
+        print(f"Warning: ProForma 解析失败：{annotate} -> {e}")
+        return []
+
     if not seq:
-        return tuple()
+        return []
+
+    if mode == "phospho":
+        try:
+            theoretical_fragments = fragment_annotation.get_theoretical_fragments(
+                seq[0],
+                ion_types="byIm",
+                max_charge=2,
+                neutral_losses={
+                    "H3PO4": -97.976896,
+                },
+            )
+        except Exception as e:
+            print(f"Warning: 理论碎片生成失败：{annotate} -> {e}")
+            return []
+
+        seq_len = len(seq[0].sequence)
+        phospho_sites = set()
+
+        for mod in getattr(seq[0], "modifications", []) or []:
+            pos = getattr(mod, "position", None)
+            if not isinstance(pos, int):
+                continue
+            labels = [
+                getattr(mod, "name", None),
+                getattr(mod, "cv_entry", None),
+                getattr(mod, "cv_label", None),
+                str(mod),
+            ]
+            label_text = " ".join(str(x) for x in labels if x).lower()
+            if "phospho" in label_text:
+                phospho_sites.add(pos + 1)
+
+        # 某些情况下 modifications 解析不到，这里兜底从 ProForma 字符串中识别 [Phospho] 标注位置
+        if not phospho_sites:
+            depth = 0
+            pos = 0
+            last_residue = None
+            i = 0
+            while i < len(annotate):
+                ch = annotate[i]
+                if ch == "[":
+                    depth += 1
+                    if depth == 1 and last_residue is not None:
+                        if str(annotate).startswith("[Phospho]", i):
+                            phospho_sites.add(last_residue)
+                    i += 1
+                    continue
+                if ch == "]":
+                    depth = max(0, depth - 1)
+                    i += 1
+                    continue
+                if depth == 0 and ch.isalpha() and ch.isupper():
+                    pos += 1
+                    last_residue = pos
+                i += 1
+
+        def covers_phospho(base_name: str) -> bool:
+            if not phospho_sites:
+                return False
+
+            base_no_charge = re.sub(r"\^\d+$", "", base_name)
+
+            m_match = re.match(r"^m(\d+):(\d+)", base_no_charge)
+            if m_match:
+                start = int(m_match.group(1))
+                end = int(m_match.group(2))
+                covered = set(range(start, end))
+                return bool(phospho_sites & covered)
+
+            if base_name.startswith("I"):
+                return False
+
+            match = re.match(r"^([abcxyz])(\d+)", base_no_charge)
+            if not match:
+                return False
+
+            ion_type, idx_str = match.groups()
+            idx = int(idx_str)
+            if ion_type in "abc":
+                covered = set(range(1, idx + 1))
+            else:  # x/y/z
+                start = max(1, seq_len - idx + 1)
+                covered = set(range(start, seq_len + 1))
+
+            return bool(phospho_sites & covered)
+
+        result = []
+        for fragment, value in theoretical_fragments:
+            name = str(fragment)
+            if "-H3PO4" in name:
+                check_name = name.replace("-H3PO4", "")
+                if not covers_phospho(check_name):
+                    continue
+            result.append((name, value))
+        return result
 
     theoretical_fragments = fragment_annotation.get_theoretical_fragments(
         seq[0], ion_types="byIm", max_charge=2
     )
-
-    result = tuple(
-        (str(fragment), value)
-        for fragment, value in theoretical_fragments
-        if not ("m" in str(fragment) and "^" in str(fragment))
-    )
+    result = []
+    for fragment, value in theoretical_fragments:
+        name = str(fragment)
+        if ("m" in name) and ("^" in name):
+            continue
+        result.append((name, value))
     return result
 
 
-def process_batch(annotate_batch):
-    """处理一批序列（在单个进程中）"""
+@lru_cache(maxsize=15)
+def cached_process_single(annotate, mode: str):
+    frags = generate_theoretical_fragments(annotate, mode)
+    return tuple(frags)
+
+
+def process_batch(args):
+    annotate_batch, mode = args
     results = []
     for annotate in annotate_batch:
-        result = cached_process_single(annotate)
-        results.append(list(result))  # 转回list格式
+        result = cached_process_single(annotate, mode)
+        results.append(list(result))
     return results
 
 
 def parallel_process_with_cache(
-    annotates, num_processes=4, batch_size=1000, prefer_threads=None, verbose=False
+    annotates,
+    num_processes=4,
+    batch_size=1000,
+    prefer_threads=None,
+    verbose=False,
+    mode: str = "unmodified",
 ):
-    """多进程+缓存+批处理，并带进度条"""
     batches = []
     for i in range(0, len(annotates), batch_size):
         batch = annotates[i : i + batch_size]
@@ -82,7 +216,7 @@ def parallel_process_with_cache(
     )
     _pool_mod = mp_thread if use_threads else mp
     with _pool_mod.Pool(processes=num_processes) as pool:
-        iterator = pool.imap(process_batch, batches)
+        iterator = pool.imap(process_batch, [(b, mode) for b in batches])
         if verbose:
             iterator = tqdm(iterator, total=len(batches), desc="theoretical fragments")
         for res in iterator:
@@ -95,11 +229,6 @@ def parallel_process_with_cache(
     return final_results
 
 
-# -----------------------------
-# Parallel intensity matching
-# -----------------------------
-
-# 尝试引入 numba，加速窗口搜索与最大值计算
 try:
     from numba import njit  # type: ignore
 
@@ -125,7 +254,6 @@ def _match_fragments_python(
         left = np.searchsorted(mz_sorted, tmz - tol, side="left")
         right = np.searchsorted(mz_sorted, tmz + tol, side="right")
         if right > left:
-            # 手动遍历求最大，避免在极短窗口频繁创建临时切片
             max_val = inten_sorted[left]
             for j in range(left + 1, right):
                 if inten_sorted[j] > max_val:
@@ -163,13 +291,14 @@ else:
 
 
 def fast_intensity_matching(
-    theory_mz_list, experiment_mz_list, experiment_int_list, mass_analyzer
+    theory_mz_list, experiment_mz_list, experiment_int_list, mass_analyzer, mode: str = "unmodified"
 ):
     """Match theoretical m/z to experimental peaks and take max intensity within tolerance.
 
     Returns a list like [[frag_str, matched_intensity], ...]. If mass_analyzer is
     not FTMS or ITMS, return None to mimic previous behavior (skip row).
     """
+    mode = str(mode or "unmodified").strip().lower()
     if theory_mz_list is None:
         return None
 
@@ -196,17 +325,48 @@ def fast_intensity_matching(
     mz_sorted = mz[order]
     inten_sorted = inten[order]
 
-    # 构造理论m/z数组（None -> NaN）
     names = []
     mz_vals = []
-    for frag_str, tmz in theory_mz_list:
+    by_mz_vals = []
+    m_indices = []
+
+    for idx, (frag_str, tmz) in enumerate(theory_mz_list):
         names.append(frag_str)
-        mz_vals.append(np.nan if tmz is None else float(tmz))
+        mz_val = np.nan if tmz is None else float(tmz)
+        mz_vals.append(mz_val)
+
+        if mode != "phospho":
+            continue
+        if tmz is None or frag_str is None:
+            continue
+
+        if (
+            isinstance(frag_str, str)
+            and len(frag_str) >= 2
+            and frag_str[0] in ("b", "y")
+            and frag_str[1].isdigit()
+        ):
+            if not np.isnan(mz_val):
+                by_mz_vals.append(mz_val)
+        elif isinstance(frag_str, str) and frag_str.startswith("m"):
+            m_indices.append(idx)
     theory_mz = np.asarray(mz_vals, dtype=np.float64)
 
-    # 容差：FTMS用20ppm，否则0.5 Da
-    is_ppm = True if mass_analyzer == "FTMS" else False
+    is_ppm = mass_analyzer == "FTMS"
     tol_value = 20.0 if is_ppm else 0.5
+
+    # phospho：若 m 离子与 b/y 离子 m/z 在容差内重叠，则将该 m 离子置为 NaN，避免重复/污染匹配
+    if mode == "phospho" and by_mz_vals and m_indices:
+        by_mz_sorted = np.sort(np.asarray(by_mz_vals, dtype=np.float64))
+        for mi in m_indices:
+            tmz = theory_mz[mi]
+            if np.isnan(tmz):
+                continue
+            tol = tmz * tol_value * 1e-6 if is_ppm else tol_value
+            left = np.searchsorted(by_mz_sorted, tmz - tol, side="left")
+            right = np.searchsorted(by_mz_sorted, tmz + tol, side="right")
+            if right > left:
+                theory_mz[mi] = np.nan
 
     intensities = _match_fragments_numba(
         theory_mz, mz_sorted, inten_sorted, tol_value, is_ppm
@@ -220,21 +380,20 @@ def fast_intensity_matching(
 
 def process_single_spectrum(args):
     """Worker: process one spectrum tuple."""
-    theory_mz_list, experiment_mz_list, experiment_int_list, mass_analyzer = args
+    theory_mz_list, experiment_mz_list, experiment_int_list, mass_analyzer, mode = args
     return fast_intensity_matching(
-        theory_mz_list, experiment_mz_list, experiment_int_list, mass_analyzer
+        theory_mz_list, experiment_mz_list, experiment_int_list, mass_analyzer, mode=mode
     )
 
 
 def parallel_intensity_matching(
-    combined_df, num_processes=4, batch_size=1000, prefer_threads=None, verbose=False
+    combined_df,
+    num_processes=4,
+    batch_size=1000,
+    prefer_threads=None,
+    verbose=False,
+    mode: str = "unmodified",
 ):
-    """单进程池 + 流式imap 的强度匹配实现。
-
-    - 单个进程池贯穿整个阶段，避免每批次反复创建/销毁进程。
-    - 使用 chunksize=batch_size 控制任务分发粒度（推荐500）。
-    - 返回与 combined_df 行对齐的结果列表。
-    """
 
     args_list = list(
         zip(
@@ -242,6 +401,7 @@ def parallel_intensity_matching(
             combined_df["mzarray"],
             combined_df["intarray"],
             combined_df["Mass analyzer"],
+            repeat(mode),
         )
     )
 
@@ -261,21 +421,15 @@ def parallel_intensity_matching(
     return results
 
 
-# 将process_pair函数移到外部
-def process_pair(meta_path, mz_path, msms_root, df_h5_dir, inner_num_procs=4):
+def process_pair(meta_path, mz_path, msms_root, df_h5_dir, inner_num_procs=4, mode: str = "unmodified"):
     try:
-        # 获取文件名，用于构建MSMS文件路径
+        if oms is None:
+            raise ImportError("缺少依赖：pyopenms（用于读取 mzML）")
         file_name = os.path.basename(meta_path)
-
-        # 构建MSMS文件路径
         MSMS = os.path.join(msms_root, file_name)
 
         df1 = pd.read_csv(MSMS, sep="\t", low_memory=False)
-        # df = pd.read_csv(meta_path, sep="\t",low_memory=False)
-        df = pd.read_csv(MSMS, sep="\t", low_memory=False)
 
-        # 过滤和重命名列
-        df_filtered = pd.read_csv(MSMS, sep="\t", low_memory=False)
         columns_to_keep = [
             "Sequence",
             "Length",
@@ -298,18 +452,14 @@ def process_pair(meta_path, mz_path, msms_root, df_h5_dir, inner_num_procs=4):
             "Raw_file",
             "Reverse",
         ]
-        meta_df = df_filtered[columns_to_keep]
+        meta_df = df1[columns_to_keep].copy()
         meta_df.columns = new_column_names
 
-        # 应用修改
         meta_df["annotate"] = meta_df["Modified_sequence"].apply(apply_modifications)
 
-        # 新建 'Mass_analyzer' 列并匹配填充
-        # 确保 MS2_Scan_Number 和 Scan number 是相同的数据类型，通常都应为整型
         df1["Scan number"] = df1["Scan number"].astype(int)
         meta_df["MS2_Scan_Number"] = meta_df["MS2_Scan_Number"].astype(int)
 
-        # 将 df1 中的 'Mass analyzer' 信息根据 'Scan number' 匹配到 meta_df 中
         meta_df = meta_df.merge(
             df1[["Scan number", "Mass analyzer", "Fragmentation"]],
             left_on="MS2_Scan_Number",
@@ -317,19 +467,20 @@ def process_pair(meta_path, mz_path, msms_root, df_h5_dir, inner_num_procs=4):
             how="left",
         )
 
-        # 删除不再需要的 'Scan number' 列
         meta_df.drop(columns=["Scan number"], inplace=True)
 
-        ## 打注释标签（多进程 + 缓存 + 批处理 + 进度条）
+        mode = str(mode or "unmodified").strip().lower()
+        prefer_threads = True if mode == "phospho" else False
+
         meta_df["theoretical_fragments"] = parallel_process_with_cache(
             meta_df["annotate"].values.tolist(),
             num_processes=inner_num_procs,
             batch_size=500,
-            prefer_threads=False,
+            prefer_threads=prefer_threads,
             verbose=False,
+            mode=mode,
         )
 
-        # 处理 .mzML 文件
         exp = oms.MSExperiment()
         oms.MzMLFile().load(mz_path, exp)
 
@@ -353,11 +504,10 @@ def process_pair(meta_path, mz_path, msms_root, df_h5_dir, inner_num_procs=4):
                     collision_energy = precursor.getMetaValue("collision energy")
                     mz_df.at[idx, "collision_energy"] = collision_energy
 
-                # 从 mzML 的 precursor activation method 提取 Fragmentation（短字符串，如 "HCD"/"CID"）
                 try:
                     short = [
                         x.decode() for x in precursor.getActivationMethodsAsShortString()
-                    ]  # 例如 ["HCD"]
+                    ]
                     frag = short[0] if short else ""
                 except Exception:
                     frag = ""
@@ -371,36 +521,20 @@ def process_pair(meta_path, mz_path, msms_root, df_h5_dir, inner_num_procs=4):
             if use_mzml.any():
                 combined_df.loc[use_mzml, "Fragmentation"] = mzml_frag.loc[use_mzml]
                 print(
-                    f"Fragmentation检查: 使用mzML覆盖={int(use_mzml.sum())}/{len(combined_df)}"
+                    f"Fragmentation: mzML override={int(use_mzml.sum())}/{len(combined_df)}"
                 )
             combined_df.drop(columns=["Fragmentation_mzml"], inplace=True)
         combined_df["collision_energy"] = (
             combined_df["collision_energy"].astype(float).fillna(30)
         )
-        # 检验collision_energy列的数据情况
-        if "collision_energy" in combined_df.columns:
-            null_count = combined_df["collision_energy"].isna().sum()
-            total_count = len(combined_df)
-            valid_count = total_count - null_count
-            print(
-                f"collision_energy检查: 总数={total_count}, 有效值={valid_count}, 空值={null_count}"
-            )
-            if valid_count > 0:
-                valid_values = combined_df["collision_energy"].dropna()
-                print(
-                    f"有效collision_energy值范围: {valid_values.min():.2f} - {valid_values.max():.2f}"
-                )
-        else:
-            print("警告: combined_df中没有collision_energy列")
-
         combined_df["theoretical_fragments_int"] = parallel_intensity_matching(
             combined_df,
             num_processes=inner_num_procs,
             batch_size=500,
-            prefer_threads=False,
+            prefer_threads=prefer_threads,
             verbose=False,
+            mode=mode,
         )
-        # 构造存储路径并保存 DataFrame
         output_path = os.path.join(df_h5_dir, meta_df["Raw_file"].iloc[0] + ".h5")
         combined_df.to_hdf(output_path, key="combined_data", mode="w")
         print(f"Processed and saved: {output_path}")
@@ -412,112 +546,81 @@ def process_pair(meta_path, mz_path, msms_root, df_h5_dir, inner_num_procs=4):
 
 
 def run_step2(config):
-    # 从配置中获取路径和性能参数
+    mode = str(config.get("mode", "unmodified")).strip().lower()
     msms_root = config["paths"]["msms_filtered_dir"]
     mzml_root = config["paths"]["mzml_dir"]
     search_root = config["paths"]["search_dir"]
-    result_base_path = os.path.dirname(config["paths"]["df_h5_dir"])
     df_h5_dir = config["paths"]["df_h5_dir"]
-
-    # 获取性能参数
     num_work = config["performance"]["num_workers"]
 
-    # 创建结果文件夹（如果不存在）
     os.makedirs(df_h5_dir, exist_ok=True)
 
-    # 定义Search目录路径
-    directory_path = search_root
+    search_files = [
+        os.path.join(search_root, f)
+        for f in os.listdir(search_root)
+        if f.endswith(".txt")
+    ]
+    search_files.sort()
 
-    # 获取目录下的所有文件和目录名
-    files = os.listdir(directory_path)
+    mzml_names = [f for f in os.listdir(mzml_root) if f.lower().endswith(".mzml")]
+    mzml_names.sort()
+    mzml_map = {os.path.splitext(f)[0]: os.path.join(mzml_root, f) for f in mzml_names}
 
-    # 初始化列表以存放所有合并后的文件名部分
-    experiment_names = []
-
-    # 打印所有文件名，分割并合并前六个字符
-    for file in files:
-        # 使用下划线作为分隔符分割文件名
-        split_name = file.split(".txt")
-        # 合并分割后的前六个元素（如果存在）
-        combined_parts = split_name[0]  # 只取前六个分割的部分
-        # 将合并后的部分添加到列表中
-        experiment_names.append(combined_parts)
-
-    # 最后，打印出整个列表，以验证所有元素已正确添加
-    print("All combined experiment names:")
-    print(experiment_names[1:6] if len(experiment_names) > 5 else experiment_names)
-
-    # 存储找到的文件路径
-    mzml_files = []
-    search_files = []
-
-    # 遍历experiment_names列表
-    for experiment_name in experiment_names:
-        # 在mzml_root目录中寻找包含experiment_name且扩展名为.mzML的文件的完整路径
-        found_mzml = False
-        for file in os.listdir(mzml_root):
-            if experiment_name in file and file.lower().endswith(".mzml"):
-                full_path = os.path.join(mzml_root, file)
-                mzml_files.append(full_path)
-                found_mzml = True
-                break  # 假设每个experiment_name只对应一个文件，找到即跳出循环
-
-        if not found_mzml:
-            print(f"Warning: No mzML file found for {experiment_name}")
-
-        # 在search_root目录中寻找包含experiment_name的文件的完整路径
-        found_search = False
-        for file in os.listdir(search_root):
-            if experiment_name in file:
-                full_path = os.path.join(search_root, file)
-                search_files.append(full_path)
-                found_search = True
-                break  # 假设每个experiment_name只对应一个文件，找到即跳出循环
-
-        if not found_search:
-            print(f"Warning: No Search file found for {experiment_name}")
-
-    # 确保数据对是完整的
     valid_pairs = []
     valid_mzml_files = []
     valid_search_files = []
 
-    for i, (search_file, mzml_file) in enumerate(zip(search_files, mzml_files)):
-        if i < len(search_files) and i < len(mzml_files):
-            valid_mzml_files.append(mzml_file)
-            valid_search_files.append(search_file)
-            valid_pairs.append((experiment_names[i], search_file, mzml_file))
+    for search_path in search_files:
+        experiment_name = os.path.splitext(os.path.basename(search_path))[0]
+
+        mzml_path = mzml_map.get(experiment_name)
+        if mzml_path is None:
+            # 兼容旧逻辑：允许“包含匹配”，但会提示风险
+            candidates = [
+                os.path.join(mzml_root, f)
+                for f in mzml_names
+                if experiment_name in f
+            ]
+            if not candidates:
+                print(f"Warning: No mzML file found for {experiment_name}")
+                continue
+            candidates.sort()
+            if mode == "phospho":
+                print(
+                    f"Warning: phospho 模式未找到精确匹配，使用包含匹配：{experiment_name} -> {os.path.basename(candidates[0])}"
+                )
+            if len(candidates) > 1:
+                print(
+                    f"Warning: Multiple mzML candidates for {experiment_name}, use: {os.path.basename(candidates[0])}"
+                )
+            mzml_path = candidates[0]
+
+        valid_search_files.append(search_path)
+        valid_mzml_files.append(mzml_path)
+        valid_pairs.append((experiment_name, search_path, mzml_path))
 
     print(f"Found {len(valid_pairs)} valid file pairs to process")
 
     def main_process(search_files, mzml_files):
-        # 外层串行 + 内层并行（32）
         inner_num_procs = 32
-        print(f"使用串行文件处理 + 内层{inner_num_procs}核心并行计算")
 
         results = []
-        # 串行处理每个文件对，使用tqdm显示进度
         for search_file, mzml_file in tqdm(
-            zip(search_files, mzml_files), total=len(search_files), desc="处理文件"
+            zip(search_files, mzml_files), total=len(search_files), desc="Processing files"
         ):
             result = process_pair(
-                search_file, mzml_file, msms_root, df_h5_dir, inner_num_procs
+                search_file, mzml_file, msms_root, df_h5_dir, inner_num_procs, mode=mode
             )
             results.append(result)
-            # 主动清理缓存，避免内存累积
             gc.collect()
 
         successful = sum(1 for r in results if r)
         print(f"Successfully processed {successful} out of {len(results)} file pairs")
 
-    # 执行主处理函数
     main_process(valid_search_files, valid_mzml_files)
-
-    print("3.2完成")
 
 
 if __name__ == "__main__":
-    # 仅用于直接运行此脚本的测试
     import os
 
     import yaml
