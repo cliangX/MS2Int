@@ -17,7 +17,6 @@
 
 <p align="center">
   🌐 <strong>Web Server</strong>: <a href="https://ms2int.com">ms2int.com</a> &nbsp;|&nbsp;
-  💻 <strong>GitHub</strong>: <a href="https://github.com/cliangX/MS2Int">github.com/cliangX/MS2Int</a>
 </p>
 
 ---
@@ -356,6 +355,6 @@ Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
 
 ## Contact
 
-Project Link: [https://github.com/YOUR_ORG/MS2Int](https://github.com/YOUR_ORG/MS2Int)
+Project Link: [https://github.com/cliangX/MS2Int](https://github.com/cliangX/MS2Int)
 
 <p align="right">(<a href="#ms2int">back to top</a>)</p>
