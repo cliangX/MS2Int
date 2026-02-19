@@ -12,8 +12,13 @@
 ![Python](https://img.shields.io/badge/Python-3.10-3776ab?logo=python)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.7-ee4c2c?logo=pytorch)
 [![Mamba](https://img.shields.io/badge/Mamba-SSM-44a833?logo=github)](https://github.com/state-spaces/mamba)
-[![GitHub Stars](https://img.shields.io/github/stars/YOUR_ORG/MS2Int.svg?style=social&label=Stars)](https://github.com/YOUR_ORG/MS2Int)
+[![GitHub Stars](https://img.shields.io/github/stars/cliangX/MS2Int.svg?style=social&label=Stars)](https://github.com/cliangX/MS2Int)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+<p align="center">
+  🌐 <strong>Web Server</strong>: <a href="https://ms2int.com">ms2int.com</a> &nbsp;|&nbsp;
+  💻 <strong>GitHub</strong>: <a href="https://github.com/cliangX/MS2Int">github.com/cliangX/MS2Int</a>
+</p>
 
 ---
 
