@@ -14,10 +14,9 @@
 [![Mamba](https://img.shields.io/badge/Mamba-SSM-44a833?logo=github)](https://github.com/state-spaces/mamba)
 [![GitHub Stars](https://img.shields.io/github/stars/cliangX/MS2Int.svg?style=social&label=Stars)](https://github.com/cliangX/MS2Int)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-
-<p align="center">
-  🌐 <strong>Web Server</strong>: <a href="https://ms2int.com">ms2int.com</a> &nbsp;|&nbsp;
-</p>
+<div align="center">
+  🌐 <strong>Web Server</strong>: <a href="https://ms2int.com">ms2int.com</a>
+</div>
 
 ---
 
@@ -302,7 +301,13 @@ output/
 
 ### Model Weights & Data
 
-This repository **does not directly provide large model weights and large datasets** (for GitHub distribution purposes). It is recommended to host weights and data on Zenodo or Hugging Face, and specify paths via `MODEL_CKPT` or command-line arguments.
+Pre-trained model weights are available for download:
+
+| Model | Description | Download |
+|-------|-------------|----------|
+| MS2Int (Unmodified) | Trained on unmodified peptides (HCD/CID) | [Google Drive](https://drive.google.com/file/d/10vPnyP-yGM9LUOm1fnRbZA8tYNcGucFC/view?usp=sharing) |
+| MS2Int (Phosphorylation) | Fine-tuned for phosphopeptides | [Google Drive](https://drive.google.com/file/d/1vkM5HzU1nVdRMnS6asqByrzuEwE0x9ij/view?usp=sharing) |
+
 
 <p align="right">(<a href="#ms2int">back to top</a>)</p>
 
