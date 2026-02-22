@@ -16,7 +16,7 @@ dist/
 # IDE / Editor
 .idea/
 .vscode/
-
+.serena/
 # Logs / outputs
 logs/
 *.log
