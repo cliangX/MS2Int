@@ -123,3 +123,4 @@ bkp/phosphorylation/step1_create_msms_search_file.py
 bkp/phosphorylation/step2_process_df_h5.py
 bkp/phosphorylation/step3_generate_train_data.py
 bkp/phosphorylation/step4_merge_final_data.py
+.serena/project.yml
