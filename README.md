@@ -9,11 +9,13 @@
   <strong>MS2Int leverages internal fragment ions to advance peptide tandem mass spectrum prediction</strong>
 </p>
 
-![Python](https://img.shields.io/badge/Python-3.10-3776ab?logo=python)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.7-ee4c2c?logo=pytorch)
-[![Mamba](https://img.shields.io/badge/Mamba-SSM-44a833?logo=github)](https://github.com/state-spaces/mamba)
-[![GitHub Stars](https://img.shields.io/github/stars/cliangX/MS2Int.svg?style=social&label=Stars)](https://github.com/cliangX/MS2Int)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.10-3776ab?logo=python" height="20"/>
+  <img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-2.7-ee4c2c?logo=pytorch" height="20"/>
+  <a href="https://github.com/state-spaces/mamba"><img alt="Mamba" src="https://img.shields.io/badge/Mamba-SSM-44a833?logo=github" height="20"/></a>
+  <a href="https://github.com/cliangX/MS2Int"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/cliangX/MS2Int.svg?style=social&amp;label=Stars" height="20"/></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg" height="20"/></a>
+</p>
 <div align="center">
   🌐 <strong>Web Server</strong>: <a href="https://ms2int.com">ms2int.com</a>
 </div>
