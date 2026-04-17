@@ -3,7 +3,18 @@ import logging
 from datetime import datetime
 import socket
 
-from hparams import get_hparams
+try:
+    from .hparams import get_hparams
+    from .model import MambaLMHeadModel
+    from .utils import *
+    from .datasets import CustomDataset
+    from .vat import VATLoss
+except ImportError:  # pragma: no cover
+    from hparams import get_hparams
+    from model import MambaLMHeadModel
+    from utils import *
+    from datasets import CustomDataset
+    from vat import VATLoss
 
 config = get_hparams()
 
@@ -22,11 +33,12 @@ from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 from tqdm import tqdm
 
-from model import MambaLMHeadModel
 from mamba_ssm.models.config_mamba import MambaConfig
+
 try:
     from lightning.pytorch import seed_everything
 except ModuleNotFoundError:  # pragma: no cover
+
     def seed_everything(seed=42, workers=True):
         import random
         import numpy as np
@@ -37,10 +49,6 @@ except ModuleNotFoundError:  # pragma: no cover
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-from utils import *
-from datasets import CustomDataset
-
-from vat import VATLoss
 
 
 log_dir = os.path.dirname(config.log_path)
@@ -125,14 +133,32 @@ def train(rank, world_size, Mamba_Config):
     val_size = total_samples - train_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    train_loader = DataLoader(train_dataset, batch_size=config.train_batch_size, sampler=train_sampler, num_workers=config.num_workers, pin_memory=True)
+    train_sampler = DistributedSampler(
+        train_dataset, num_replicas=world_size, rank=rank, shuffle=True
+    )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.train_batch_size,
+        sampler=train_sampler,
+        num_workers=config.num_workers,
+        pin_memory=True,
+    )
 
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
-    val_loader = DataLoader(val_dataset, batch_size=config.val_batch_size, sampler=val_sampler, num_workers=config.num_workers, pin_memory=True)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config.val_batch_size,
+        sampler=val_sampler,
+        num_workers=config.num_workers,
+        pin_memory=True,
+    )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
-    lr_scheduler = CosineWarmupScheduler(optimizer, warmup=config.warmup_iters, max_iters=config.max_iters)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
+    )
+    lr_scheduler = CosineWarmupScheduler(
+        optimizer, warmup=config.warmup_iters, max_iters=config.max_iters
+    )
 
     best_val_loss = 99999
     max_epochs = config.max_epochs
@@ -141,7 +167,11 @@ def train(rank, world_size, Mamba_Config):
         epoch_loss = 0.0
 
         if rank == 0:
-            train_progress = tqdm(train_loader, ncols=100, desc=f"Epoch {epoch + 1}/{max_epochs} Training(VAT)")
+            train_progress = tqdm(
+                train_loader,
+                ncols=100,
+                desc=f"Epoch {epoch + 1}/{max_epochs} Training(VAT)",
+            )
         else:
             train_progress = train_loader
 
@@ -166,7 +196,15 @@ def train(rank, world_size, Mamba_Config):
             batch_size = batch[0].size(0)
             sup_loss = sup_loss / batch_size
 
-            vat_loss = vat_loss_fn(model, batch[0], batch[1], batch[2], batch[3], masks, base_pred=base_pred)
+            vat_loss = vat_loss_fn(
+                model,
+                batch[0],
+                batch[1],
+                batch[2],
+                batch[3],
+                masks,
+                base_pred=base_pred,
+            )
             loss = sup_loss + config.vat_alpha * vat_loss
 
             loss.backward()
@@ -187,7 +225,9 @@ def train(rank, world_size, Mamba_Config):
         val_loss = validate(rank, world_size, model, val_loader, device)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            save_checkpoint(rank, model, optimizer, epoch, val_loss, config.checkpoint_path)
+            save_checkpoint(
+                rank, model, optimizer, epoch, val_loss, config.checkpoint_path
+            )
 
     cleanup()
 
@@ -244,9 +284,14 @@ def save_checkpoint(rank, model, optimizer, epoch, val_loss, checkpoint_path):
                 "optimizer_state_dict": optimizer.state_dict(),
                 "val_loss": val_loss,
             },
-            os.path.join(checkpoint_path, f"model_epoch_{epoch}_val_loss_{val_loss:.4f}_{current_time}.pth"),
+            os.path.join(
+                checkpoint_path,
+                f"model_epoch_{epoch}_val_loss_{val_loss:.4f}_{current_time}.pth",
+            ),
         )
-        logging.info(f"Checkpoint saved at epoch {epoch} with validation loss {val_loss:.4f}")
+        logging.info(
+            f"Checkpoint saved at epoch {epoch} with validation loss {val_loss:.4f}"
+        )
 
 
 if __name__ == "__main__":
@@ -256,4 +301,6 @@ if __name__ == "__main__":
     if int(config.port) != resolved_port:
         print(f"端口 {config.port} 被占用，已自动切换到 {resolved_port}")
 
-    torch.multiprocessing.spawn(train, args=(WORLD_SIZE, Mamba_Config), nprocs=WORLD_SIZE, join=True)
+    torch.multiprocessing.spawn(
+        train, args=(WORLD_SIZE, Mamba_Config), nprocs=WORLD_SIZE, join=True
+    )

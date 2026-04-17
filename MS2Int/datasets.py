@@ -1,5 +1,10 @@
 import h5py
-from preprocess import data_read
+
+try:
+    from .preprocess import data_read
+except ImportError:  # pragma: no cover
+    from preprocess import data_read
+
 from torch.utils.data import Dataset
 
 

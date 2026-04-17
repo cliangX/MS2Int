@@ -2,28 +2,46 @@ import h5py
 import torch
 import numpy as np
 
+try:
+    from .metadata_vocab import (
+        encode_charge,
+        encode_collision_energy,
+        encode_fragmentation,
+        validate_length,
+        SUPPORTED_MAX_LENGTH,
+    )
+except ImportError:  # pragma: no cover
+    from metadata_vocab import (
+        encode_charge,
+        encode_collision_energy,
+        encode_fragmentation,
+        validate_length,
+        SUPPORTED_MAX_LENGTH,
+    )
+
+
 def tokenize_peptide(seq: str):
     tokens = []
     i, n = 0, len(seq)
-    if seq.startswith('['):
-        j = seq.find(']-', 0)
+    if seq.startswith("["):
+        j = seq.find("]-", 0)
         if j == -1:
             raise ValueError("N-terminus modification missing ']-'")
-        tokens.append(seq[:j + 2])
+        tokens.append(seq[: j + 2])
         i = j + 2
     while i < n:
-        if seq.startswith('-[]', i):
-            tokens.append('-[]')
+        if seq.startswith("-[]", i):
+            tokens.append("-[]")
             i += 3
             continue
         ch = seq[i]
-        if 'A' <= ch <= 'Z':
+        if "A" <= ch <= "Z":
             i += 1
-            if i < n and seq[i] == '[':
-                j = seq.find(']', i)
+            if i < n and seq[i] == "[":
+                j = seq.find("]", i)
                 if j == -1:
                     raise ValueError("Residue modification missing ']' ")
-                tokens.append(ch + seq[i:j + 1])
+                tokens.append(ch + seq[i : j + 1])
                 i = j + 1
             else:
                 tokens.append(ch)
@@ -31,10 +49,11 @@ def tokenize_peptide(seq: str):
             raise ValueError(f"Invalid character '{ch}' at pos {i}")
     return tokens
 
+
 def data_read(h5_or_path, idx, include_train: bool = True):
     need_close = False
     if isinstance(h5_or_path, str):
-        f = h5py.File(h5_or_path, 'r')
+        f = h5py.File(h5_or_path, "r")
         need_close = True
     else:
         f = h5_or_path
@@ -47,19 +66,20 @@ def data_read(h5_or_path, idx, include_train: bool = True):
         Sequence = np.array(
             [s.decode("utf-8") if isinstance(s, bytes) else s for s in Sequence]
         )
-        Length = f['Length'][idx:idx+1]
-        Charge = f['Charge'][idx:idx+1]
-        collision_energy = f['collision_energy'][idx:idx+1]
+        Length = f["Length"][idx : idx + 1]
+        Charge = f["Charge"][idx : idx + 1]
+        collision_energy = f["collision_energy"][idx : idx + 1]
         instrument = f["Fragmentation"][idx : idx + 1]
-        instrument = np.array([s.decode('utf-8') if isinstance(s, bytes) else s for s in instrument])
-        if include_train and 'train_data' in f:
-            train_data = f['train_data'][idx:idx+1]
+        instrument = np.array(
+            [s.decode("utf-8") if isinstance(s, bytes) else s for s in instrument]
+        )
+        if include_train and "train_data" in f:
+            train_data = f["train_data"][idx : idx + 1]
         else:
             train_data = None
     finally:
         if need_close:
             f.close()
-
 
     AA = {
         "A": 1,
@@ -117,24 +137,27 @@ def data_read(h5_or_path, idx, include_train: bool = True):
         "K[UNIMOD:1289]": 44,
         "K[UNIMOD:747]": 45,
     }
-    instruments = ["HCD", "CID"]
-    charges = list(range(1, 7))
-    collision_energies = [10, 20, 23, 25, 26, 27, 28, 29, 30, 35, 40, 42]
-
-    instrument_to_idx = {inst: idx for idx, inst in enumerate(instruments)}
-    charge_to_idx = {charge: idx for idx, charge in enumerate(charges)}
-    collision_energy_to_idx = {ce: idx for idx, ce in enumerate(collision_energies)}
     aa_to_idx = {key: idx + 1 for idx, key in enumerate(AA)}
 
-    max_seq_length = 30
-    Length = torch.tensor(Length)
+    max_seq_length = SUPPORTED_MAX_LENGTH
+    validated_lengths = [validate_length(length) for length in Length]
+    Length = torch.tensor(validated_lengths)
     tokens_list = [tokenize_peptide(seq) for seq in Sequence]
     encoded = [[aa_to_idx.get(tok, 0) for tok in tokens] for tokens in tokens_list]
-    padded = [enc[:max_seq_length] + [0] * (max_seq_length - len(enc)) if len(enc) < max_seq_length else enc[:max_seq_length] for enc in encoded]
+    padded = [
+        enc[:max_seq_length] + [0] * (max_seq_length - len(enc))
+        if len(enc) < max_seq_length
+        else enc[:max_seq_length]
+        for enc in encoded
+    ]
     sequence_tensor = torch.tensor(padded)
-    charge_tensor = torch.tensor([charge_to_idx.get(charge, 0) for charge in Charge])
-    collision_energy_tensor = torch.tensor([collision_energy_to_idx.get(int(energy), 0) for energy in collision_energy])
-    instrument_tensor = torch.tensor([instrument_to_idx.get(inst, 0) for inst in instrument])
+    charge_tensor = torch.tensor([encode_charge(charge) for charge in Charge])
+    collision_energy_tensor = torch.tensor(
+        [encode_collision_energy(energy) for energy in collision_energy]
+    )
+    instrument_tensor = torch.tensor(
+        [encode_fragmentation(inst) for inst in instrument]
+    )
     if train_data is not None:
         train_data = torch.tensor(train_data)
 
@@ -145,6 +168,19 @@ def data_read(h5_or_path, idx, include_train: bool = True):
     Length = torch.squeeze(Length)
     if train_data is not None:
         train_data = torch.squeeze(train_data)
-        return instrument_tensor, charge_tensor, collision_energy_tensor, sequence_tensor, Length, train_data
+        return (
+            instrument_tensor,
+            charge_tensor,
+            collision_energy_tensor,
+            sequence_tensor,
+            Length,
+            train_data,
+        )
     else:
-        return instrument_tensor, charge_tensor, collision_energy_tensor, sequence_tensor, Length
+        return (
+            instrument_tensor,
+            charge_tensor,
+            collision_energy_tensor,
+            sequence_tensor,
+            Length,
+        )

@@ -11,17 +11,40 @@ from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from mamba_ssm.models.config_mamba import MambaConfig
-from model import MambaLMHeadModel
-from datasets import CustomDataset
-from utils import *
+
+try:
+    from .model import MambaLMHeadModel
+    from .datasets import CustomDataset
+    from .utils import *
+    from .metadata_vocab import SUPPORTED_MAX_LENGTH
+except ImportError:  # pragma: no cover
+    from model import MambaLMHeadModel
+    from datasets import CustomDataset
+    from utils import *
+    from metadata_vocab import SUPPORTED_MAX_LENGTH
 
 parser = argparse.ArgumentParser(description="Spectrum prediction")
-parser.add_argument("--checkpoint_path", "--ckpt", dest="checkpoint_path",
-                    required=True, help="Model checkpoint path (.pth)")
-parser.add_argument("--input_path", "--input", dest="input_path",
-                    required=True, help="Input file path (.h5, .csv, or .tsv)")
-parser.add_argument("--output_path", "--output", dest="output_path",
-                    required=True, help="Output HDF5 path")
+parser.add_argument(
+    "--checkpoint_path",
+    "--ckpt",
+    dest="checkpoint_path",
+    required=True,
+    help="Model checkpoint path (.pth)",
+)
+parser.add_argument(
+    "--input_path",
+    "--input",
+    dest="input_path",
+    required=True,
+    help="Input file path (.h5, .csv, or .tsv)",
+)
+parser.add_argument(
+    "--output_path",
+    "--output",
+    dest="output_path",
+    required=True,
+    help="Output HDF5 path",
+)
 args = parser.parse_args()
 
 REQUIRED_COLS = ["Sequence", "Length", "Charge", "collision_energy", "Fragmentation"]
@@ -40,10 +63,15 @@ def _csv_to_h5(csv_path: str, h5_path: str) -> None:
         )
         f.create_dataset("Length", data=df["Length"].values.astype(np.int32))
         f.create_dataset("Charge", data=df["Charge"].values.astype(np.int32))
-        f.create_dataset("collision_energy", data=df["collision_energy"].values.astype(np.int32))
+        f.create_dataset(
+            "collision_energy", data=df["collision_energy"].values.astype(np.int32)
+        )
         f.create_dataset(
             "Fragmentation",
-            data=df["Fragmentation"].astype(str).str.encode("utf-8").values.astype("S10"),
+            data=df["Fragmentation"]
+            .astype(str)
+            .str.encode("utf-8")
+            .values.astype("S10"),
         )
     print(f"Converted {csv_path} -> {h5_path} ({len(df)} samples)")
 
@@ -103,7 +131,9 @@ def test(model, test_loader, device):
             seq = seq.to(device, non_blocking=True)
 
             outputs = model(inst, charge, ce, seq)
-            masks = create_batch_loss_masks(lengths.tolist()).to(device, non_blocking=True)
+            masks = create_batch_loss_masks(lengths.tolist()).to(
+                device, non_blocking=True
+            )
             outputs[outputs < 0] = 0
             outputs = outputs * masks
             all_y_outputs.append(outputs.cpu())
@@ -122,19 +152,21 @@ with h5py.File(input_path, "r") as f:
     seq_ds = f.get("Sequence", None)
     total_samples = int(length_ds.shape[0])
 
-    # Unified filter: Length<=30 and sequence must not contain 'U'
+    # Unified filter: Length<=40 and sequence must not contain 'U'
     chunk_size = 200_000
     valid_indices = []
     filtered_by_length = 0
     filtered_by_u = 0
 
     if seq_ds is None:
-        print("Warning: input H5 is missing the Sequence dataset; skipping U-filter (Length<=30 filter only)")
+        print(
+            f"Warning: input H5 is missing the Sequence dataset; skipping U-filter (Length<={SUPPORTED_MAX_LENGTH} filter only)"
+        )
 
     for start in range(0, total_samples, chunk_size):
         end = min(start + chunk_size, total_samples)
         lengths = np.asarray(length_ds[start:end])
-        is_len_ok = lengths <= 30
+        is_len_ok = lengths <= SUPPORTED_MAX_LENGTH
 
         if seq_ds is None:
             no_u = np.ones_like(is_len_ok, dtype=bool)
@@ -156,7 +188,7 @@ with h5py.File(input_path, "r") as f:
 
     print(
         f"Samples: {len(valid_indices)}/{total_samples} "
-        f"(filtered length>30: {filtered_by_length}, filtered U: {filtered_by_u})"
+        f"(filtered length>{SUPPORTED_MAX_LENGTH}: {filtered_by_length}, filtered U: {filtered_by_u})"
     )
 
 original_dataset = CustomDataset(input_path, include_train=False)

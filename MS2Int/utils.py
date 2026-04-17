@@ -4,6 +4,23 @@ import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 
+try:
+    from .metadata_vocab import (
+        SUPPORTED_CHARGES,
+        SUPPORTED_COLLISION_ENERGIES,
+        SUPPORTED_FRAGMENTATIONS,
+        SUPPORTED_MAX_LENGTH,
+        TARGET_OUTPUT_SHAPE,
+    )
+except ImportError:  # pragma: no cover
+    from metadata_vocab import (
+        SUPPORTED_CHARGES,
+        SUPPORTED_COLLISION_ENERGIES,
+        SUPPORTED_FRAGMENTATIONS,
+        SUPPORTED_MAX_LENGTH,
+        TARGET_OUTPUT_SHAPE,
+    )
+
 
 class CosineWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
     def __init__(self, optimizer: torch.optim.Optimizer, warmup: int, max_iters: int):
@@ -50,21 +67,29 @@ def masked_cosine_similarity(y_true, y_pred):
 class MetaEmbeddingModel(nn.Module):
     def __init__(self, charge_dim=6, energy_dim=51, instrument_dim=4, final_dim=128):
         super().__init__()
-        self.instrument_embedding = nn.Embedding(4, instrument_dim)
-        self.charge_embedding = nn.Embedding(6, charge_dim)
-        self.collision_energy_embedding = nn.Embedding(12, energy_dim)
+        self.instrument_embedding = nn.Embedding(
+            len(SUPPORTED_FRAGMENTATIONS), instrument_dim
+        )
+        self.charge_embedding = nn.Embedding(len(SUPPORTED_CHARGES), charge_dim)
+        self.collision_energy_embedding = nn.Embedding(
+            len(SUPPORTED_COLLISION_ENERGIES), energy_dim
+        )
         self.aa_embedding = nn.Embedding(25, final_dim, padding_idx=0)
-        self.max_aa_length = 30
+        self.max_aa_length = SUPPORTED_MAX_LENGTH
         self.final_dim = final_dim
         self.fc = nn.Linear(charge_dim + energy_dim + instrument_dim, final_dim)
 
     def forward(self, instrument_idx, charge_idx, collision_energy_idx):
         instrument_embed = self.instrument_embedding(instrument_idx).unsqueeze(1)
         charge_embed = self.charge_embedding(charge_idx).unsqueeze(1)
-        collision_energy_embed = self.collision_energy_embedding(collision_energy_idx).unsqueeze(1)
-        concatenated = torch.cat((charge_embed, instrument_embed, collision_energy_embed), dim=2)
+        collision_energy_embed = self.collision_energy_embedding(
+            collision_energy_idx
+        ).unsqueeze(1)
+        concatenated = torch.cat(
+            (charge_embed, instrument_embed, collision_energy_embed), dim=2
+        )
         meta_embedding = self.fc(concatenated)
-        return meta_embedding.expand(-1, 30, self.final_dim)
+        return meta_embedding.expand(-1, self.max_aa_length, self.final_dim)
 
 
 class AminoAcidEmbedding(nn.Module):
@@ -109,7 +134,11 @@ def count_parameters(model, model_name="model", model_type="Mamba2Gate", mode="t
 """
 
 
-def create_batch_loss_masks(lengths_list, max_seq_len: int = 29, d_dim: int = 31) -> torch.Tensor:
+def create_batch_loss_masks(
+    lengths_list,
+    max_seq_len: int = TARGET_OUTPUT_SHAPE[0],
+    d_dim: int = TARGET_OUTPUT_SHAPE[1],
+) -> torch.Tensor:
     batch_size = len(lengths_list)
     masks = torch.zeros((batch_size, max_seq_len, d_dim), dtype=torch.int)
 
@@ -118,12 +147,12 @@ def create_batch_loss_masks(lengths_list, max_seq_len: int = 29, d_dim: int = 31
             L = int(lengths.item())
         else:
             L = int(lengths)
-        L = max(0, min(L, max_seq_len))
+        L = max(0, min(L - 1, max_seq_len))
 
         if L > 0:
-            masks[batch_idx, : max(L - 1, 0), :4] = 1
+            masks[batch_idx, :L, :4] = 1
 
-        for idx, lens in enumerate(range(L, 3, -1)):
+        for idx, lens in enumerate(range(L + 1, 3, -1)):
             if idx < max_seq_len:
                 masks[batch_idx, idx, 3 : min(lens + 1, d_dim)] = 1
 
@@ -132,9 +161,19 @@ def create_batch_loss_masks(lengths_list, max_seq_len: int = 29, d_dim: int = 31
 
 def load_checkpoint(checkpoint_path: str, model: torch.nn.Module):
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    new_state_dict = {k.replace('module.', ''): v for k, v in checkpoint['model_state_dict'].items()}
-    model.load_state_dict(new_state_dict)
-    epoch = checkpoint['epoch']
-    val_loss = checkpoint['val_loss']
-    print(f"Loaded checkpoint '{checkpoint_path}' from epoch {epoch} with validation loss {val_loss:.4f}.")
+    new_state_dict = {
+        k.replace("module.", ""): v for k, v in checkpoint["model_state_dict"].items()
+    }
+    try:
+        model.load_state_dict(new_state_dict)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Checkpoint 与当前 40aa/39x41 训练契约不兼容，请使用新契约训练得到的权重，"
+            f"或留空 --pth 重新开始 fine-tune。原始错误: {exc}"
+        ) from exc
+    epoch = checkpoint["epoch"]
+    val_loss = checkpoint["val_loss"]
+    print(
+        f"Loaded checkpoint '{checkpoint_path}' from epoch {epoch} with validation loss {val_loss:.4f}."
+    )
     return epoch, val_loss
