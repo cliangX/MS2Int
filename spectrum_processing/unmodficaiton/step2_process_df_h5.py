@@ -3,6 +3,7 @@ import multiprocessing as mp
 import multiprocessing.dummy as mp_thread
 import os
 import re
+import sys
 import warnings
 from functools import lru_cache
 from itertools import repeat
@@ -11,6 +12,9 @@ os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 import numpy as np
 import pandas as pd
+
+# 兼容旧版 numba cache 中记录的顶层模块名，避免多进程反序列化时导入失败。
+sys.modules.setdefault("step2_process_df_h5", sys.modules[__name__])
 
 try:
     import pyopenms as oms  # type: ignore

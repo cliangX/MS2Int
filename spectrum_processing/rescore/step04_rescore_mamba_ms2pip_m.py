@@ -74,6 +74,9 @@ def _to_builtin(obj: Any) -> Any:
 
 
 def accepted_to_records(accepted_obj: Any) -> List[Dict[str, Any]]:
+    if isinstance(accepted_obj, dict):
+        if all(not isinstance(v, (list, tuple, set, np.ndarray, pd.Series)) for v in accepted_obj.values()):
+            return [_to_builtin(accepted_obj)]
     df = pd.DataFrame(accepted_obj)
     if not df.empty:
         return [_to_builtin(r) for r in df.to_dict(orient="records")]

@@ -1,13 +1,19 @@
 import os
 import logging
 from datetime import datetime
+import socket
 
 from hparams import get_hparams
 
 config = get_hparams()
 
-import setproctitle
-setproctitle.setproctitle(config.experiment_name)
+try:
+    import setproctitle
+except ModuleNotFoundError:  # pragma: no cover
+    setproctitle = None
+
+if setproctitle is not None:
+    setproctitle.setproctitle(config.experiment_name)
 
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -68,9 +74,33 @@ Mamba_Config = MambaConfig(
 WORLD_SIZE = config.world_size
 
 
+def _is_port_available(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def _resolve_master_port(preferred_port: int) -> int:
+    try:
+        port = int(preferred_port)
+    except (TypeError, ValueError):
+        port = 0
+
+    if port > 0 and _is_port_available(port):
+        return port
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 def setup(rank, world_size):
     os.environ["MASTER_ADDR"] = str(config.server)
-    os.environ["MASTER_PORT"] = str(config.port)
+    os.environ["MASTER_PORT"] = str(os.environ.get("MS2INT_MASTER_PORT", config.port))
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 
@@ -224,5 +254,9 @@ def save_checkpoint(rank, model, optimizer, epoch, val_loss, checkpoint_path):
 
 if __name__ == "__main__":
     seed_everything(seed=42, workers=True)
+    resolved_port = _resolve_master_port(config.port)
+    os.environ["MS2INT_MASTER_PORT"] = str(resolved_port)
+    if int(config.port) != resolved_port:
+        print(f"端口 {config.port} 被占用，已自动切换到 {resolved_port}")
 
     torch.multiprocessing.spawn(train, args=(WORLD_SIZE, Mamba_Config), nprocs=WORLD_SIZE, join=True)
