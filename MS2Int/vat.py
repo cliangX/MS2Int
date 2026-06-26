@@ -8,7 +8,7 @@ Based on the VAT method proposed by Google Brain:
     https://arxiv.org/abs/1704.03976
 
 Adapted for regression on mass spectrometry intensity prediction:
-  - Perturbation target: amino acid sequence embedding output (via forward hook).
+  - Perturbation target: collision energy embedding output (via forward hook).
   - Consistency metric: masked MSE on valid spectrum positions.
 """
 
@@ -44,7 +44,7 @@ class VATConfig:
     eps: float = 2.0
     xi: float = 1e-6
     ip: int = 1
-    emb_name: str = "backbone.AminoAcidEmbedding.aa_embedding"
+    emb_name: str = "backbone.MetaEmbedding.collision_energy_embedding"
 
 
 class VATLoss(nn.Module):
@@ -96,30 +96,30 @@ class VATLoss(nn.Module):
                 base_pred = model(inst, charge, ce, seq)
         base_pred = base_pred.detach()
 
-        token_mask = (seq != 0).to(dtype=base_pred.dtype).unsqueeze(-1)
-
+        # CE embedding 是 per-sample 标量，无 padding，不需要 token_mask
         root = _unwrap_ddp(model)
         emb_layer = _get_submodule(root, self.cfg.emb_name)
         with torch.no_grad():
-            emb_out = emb_layer(seq)  # (B,30,128)
+            emb_out = emb_layer(ce)  # (B, energy_dim)
 
         d = torch.randn_like(emb_out)
-        d = d * token_mask
         d = _l2_normalize(d).detach()
 
+        # 中间迭代只为求 d 的梯度，不需要 DDP 同步，用 unwrapped model 避免冗余开销
+        raw_model = _unwrap_ddp(model)
         for _ in range(max(1, int(self.cfg.ip))):
             d = d.detach()
             d.requires_grad_(True)
             delta = self.cfg.xi * d
-            delta = delta * token_mask
 
-            y_hat = self._forward_with_delta(model, inst, charge, ce, seq, delta)
+            y_hat = self._forward_with_delta(raw_model, inst, charge, ce, seq, delta)
             div = self._mse_masked(y_hat, base_pred, masks)
             grad = torch.autograd.grad(div, d, retain_graph=False, create_graph=False)[0]
 
-            d = _l2_normalize(grad.detach()) * token_mask
+            d = _l2_normalize(grad.detach())
 
         r_adv = self.cfg.eps * d.detach()
+        # 最终前向走 DDP 保证反向传播时梯度正确同步
         y_adv = self._forward_with_delta(model, inst, charge, ce, seq, r_adv)
         vat_loss = self._mse_masked(y_adv, base_pred, masks)
         return vat_loss

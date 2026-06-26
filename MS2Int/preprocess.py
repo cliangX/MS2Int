@@ -4,6 +4,7 @@ import numpy as np
 
 try:
     from .metadata_vocab import (
+        encode_aa,
         encode_charge,
         encode_collision_energy,
         encode_fragmentation,
@@ -12,6 +13,7 @@ try:
     )
 except ImportError:  # pragma: no cover
     from metadata_vocab import (
+        encode_aa,
         encode_charge,
         encode_collision_energy,
         encode_fragmentation,
@@ -50,7 +52,13 @@ def tokenize_peptide(seq: str):
     return tokens
 
 
+def _decode_bytes(arr):
+    """将 bytes 数组解码为 str 数组。"""
+    return np.array([s.decode("utf-8") if isinstance(s, bytes) else s for s in arr])
+
+
 def data_read(h5_or_path, idx, include_train: bool = True):
+    # 支持三种数据源：文件路径 str / h5py.File / 内存 dict
     need_close = False
     if isinstance(h5_or_path, str):
         f = h5py.File(h5_or_path, "r")
@@ -59,20 +67,16 @@ def data_read(h5_or_path, idx, include_train: bool = True):
         f = h5_or_path
 
     try:
-        if "annotate" in f:
-            Sequence = f["annotate"][idx : idx + 1]
+        if "annotate" not in f:
+            raise KeyError('H5 缺少 "annotate" 列，当前实现仅支持使用 annotate')
+        if "annotate_full" in f:
+            primary_seq = _decode_bytes(f["annotate_full"][idx : idx + 1])
         else:
-            Sequence = f["Sequence"][idx : idx + 1]
-        Sequence = np.array(
-            [s.decode("utf-8") if isinstance(s, bytes) else s for s in Sequence]
-        )
+            primary_seq = _decode_bytes(f["annotate"][idx : idx + 1])
         Length = f["Length"][idx : idx + 1]
         Charge = f["Charge"][idx : idx + 1]
         collision_energy = f["collision_energy"][idx : idx + 1]
-        instrument = f["Fragmentation"][idx : idx + 1]
-        instrument = np.array(
-            [s.decode("utf-8") if isinstance(s, bytes) else s for s in instrument]
-        )
+        instrument = _decode_bytes(f["Fragmentation"][idx : idx + 1])
         if include_train and "train_data" in f:
             train_data = f["train_data"][idx : idx + 1]
         else:
@@ -81,69 +85,12 @@ def data_read(h5_or_path, idx, include_train: bool = True):
         if need_close:
             f.close()
 
-    AA = {
-        "A": 1,
-        "C": 2,
-        "D": 3,
-        "E": 4,
-        "F": 5,
-        "G": 6,
-        "H": 7,
-        "I": 8,
-        "K": 9,
-        "L": 10,
-        "M": 11,
-        "N": 12,
-        "P": 13,
-        "Q": 14,
-        "R": 15,
-        "S": 16,
-        "T": 17,
-        "V": 18,
-        "W": 19,
-        "Y": 20,
-        "[]-": 21,
-        "-[]": 22,
-        "[Acetyl]-": 38,
-        "M[Oxidation]": 23,
-        "S[Phospho]": 24,
-        "T[Phospho]": 25,
-        "Y[Phospho]": 26,
-        "K[Dimethyl]": 40,
-        "K[Trimethyl]": 41,
-        "K[Formyl]": 42,
-        "K[Propionyl]": 43,
-        "K[Succinyl]": 46,
-        "K[Biotin]": 50,
-        "K[UNIMOD:737]": 55,
-        "R[Dimethyl]": 51,
-        "R[UNIMOD:36a]": 52,
-        "P[Oxidation]": 53,
-        "Y[Nitro]": 54,
-        "K[Methyl]": 32,
-        "T[HexNAc]": 35,
-        "S[HexNAc]": 36,
-        "C[Carbamidomethyl]": 37,
-        "E[Glu->pyro-Glu]": 39,
-        "R[Phospho]": 27,
-        "K[Acetyl]": 28,
-        "K[GG]": 29,
-        "Q[Gln->pyro-Glu]": 30,
-        "R[Methyl]": 31,
-        "[UNIMOD:737]-": 56,
-        "K[UNIMOD:1848]": 47,
-        "K[UNIMOD:1363]": 48,
-        "K[UNIMOD:1849]": 49,
-        "K[UNIMOD:1289]": 44,
-        "K[UNIMOD:747]": 45,
-    }
-    aa_to_idx = {key: idx + 1 for idx, key in enumerate(AA)}
 
     max_seq_length = SUPPORTED_MAX_LENGTH
     validated_lengths = [validate_length(length) for length in Length]
     Length = torch.tensor(validated_lengths)
-    tokens_list = [tokenize_peptide(seq) for seq in Sequence]
-    encoded = [[aa_to_idx.get(tok, 0) for tok in tokens] for tokens in tokens_list]
+    tokens_list = [tokenize_peptide(seq) for seq in primary_seq]
+    encoded = [[encode_aa(tok) for tok in tokens] for tokens in tokens_list]
     padded = [
         enc[:max_seq_length] + [0] * (max_seq_length - len(enc))
         if len(enc) < max_seq_length

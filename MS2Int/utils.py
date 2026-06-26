@@ -6,6 +6,7 @@ import pandas as pd
 
 try:
     from .metadata_vocab import (
+        NUM_AA_TOKENS,
         SUPPORTED_CHARGES,
         SUPPORTED_COLLISION_ENERGIES,
         SUPPORTED_FRAGMENTATIONS,
@@ -14,6 +15,7 @@ try:
     )
 except ImportError:  # pragma: no cover
     from metadata_vocab import (
+        NUM_AA_TOKENS,
         SUPPORTED_CHARGES,
         SUPPORTED_COLLISION_ENERGIES,
         SUPPORTED_FRAGMENTATIONS,
@@ -44,12 +46,10 @@ def _masked_cosine_core(y_true, y_pred):
     if not isinstance(y_pred, torch.Tensor):
         y_pred = torch.tensor(y_pred, dtype=torch.float32)
 
-    epsilon = 1e-7
-    pred_masked = ((y_true + 1) * y_pred) / (y_true + 1 + epsilon)
-    true_masked = ((y_true + 1) * y_true) / (y_true + 1 + epsilon)
+    y_pred = y_pred.clamp_min(0.0)
 
-    pred_norm = F.normalize(pred_masked, p=2, dim=-1)
-    true_norm = F.normalize(true_masked, p=2, dim=-1)
+    pred_norm = F.normalize(y_pred, p=2, dim=-1)
+    true_norm = F.normalize(y_true, p=2, dim=-1)
 
     product = torch.sum(pred_norm * true_norm, dim=-1)
     return product
@@ -57,6 +57,8 @@ def _masked_cosine_core(y_true, y_pred):
 
 def masked_spectral_distance(y_true, y_pred):
     product = _masked_cosine_core(y_true, y_pred)
+    # clamp 避免 acos 在 ±1 处梯度为 -1/√(1-x²) → ∞ 导致 NaN
+    product = product.clamp(-1 + 1e-6, 1 - 1e-6)
     return 2 * torch.acos(product) / torch.pi
 
 
@@ -65,7 +67,7 @@ def masked_cosine_similarity(y_true, y_pred):
 
 
 class MetaEmbeddingModel(nn.Module):
-    def __init__(self, charge_dim=6, energy_dim=51, instrument_dim=4, final_dim=128):
+    def __init__(self, charge_dim=16, energy_dim=16, instrument_dim=4, final_dim=128):
         super().__init__()
         self.instrument_embedding = nn.Embedding(
             len(SUPPORTED_FRAGMENTATIONS), instrument_dim
@@ -95,7 +97,7 @@ class MetaEmbeddingModel(nn.Module):
 class AminoAcidEmbedding(nn.Module):
     def __init__(self, amino_acid_dim=128):
         super().__init__()
-        self.aa_embedding = nn.Embedding(54, amino_acid_dim)
+        self.aa_embedding = nn.Embedding(NUM_AA_TOKENS + 1, amino_acid_dim)
 
     def forward(self, aa_idx):
         return self.aa_embedding(aa_idx)
@@ -177,3 +179,49 @@ def load_checkpoint(checkpoint_path: str, model: torch.nn.Module):
         f"Loaded checkpoint '{checkpoint_path}' from epoch {epoch} with validation loss {val_loss:.4f}."
     )
     return epoch, val_loss
+
+
+def load_resume_checkpoint(
+    checkpoint_path: str,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer = None,
+    map_location="cpu",
+    optimizer_device: torch.device = None,
+):
+    """
+    从保存的 checkpoint 中恢复训练状态。
+    - 同时加载 model_state_dict、optimizer_state_dict
+    - 返回 (last_epoch, best_val_loss)；恢复时应从 last_epoch + 1 继续
+    - optimizer_device：若提供，则将 optimizer 内部 state tensor 搬到该 device
+    """
+    checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+    new_state_dict = {
+        k.replace("module.", ""): v for k, v in checkpoint["model_state_dict"].items()
+    }
+    try:
+        model.load_state_dict(new_state_dict)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Checkpoint 与当前模型结构不兼容（d_model/n_layer/vocab 可能不一致）。"
+            f"原始错误: {exc}"
+        ) from exc
+
+    if optimizer is not None:
+        if "optimizer_state_dict" not in checkpoint:
+            raise KeyError(
+                f"Checkpoint '{checkpoint_path}' 中缺少 optimizer_state_dict，无法恢复优化器状态。"
+            )
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        # 将 optimizer 内部缓存 tensor 搬到训练 device，否则后续 step 会跨设备报错
+        if optimizer_device is not None:
+            for state in optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(optimizer_device)
+
+    last_epoch = int(checkpoint["epoch"])
+    best_val_loss = float(checkpoint["val_loss"])
+    print(
+        f"Resumed from '{checkpoint_path}': last_epoch={last_epoch}, val_loss={best_val_loss:.4f}."
+    )
+    return last_epoch, best_val_loss

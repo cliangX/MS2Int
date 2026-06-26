@@ -214,11 +214,12 @@ class BiDirectionMixerModel(nn.Module):
         )
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
+        layers = list(self.forward_layers) + list(self.backward_layers)
         return {
             i: layer.allocate_inference_cache(
                 batch_size, max_seqlen, dtype=dtype, **kwargs
             )
-            for i, layer in enumerate(self.layers)
+            for i, layer in enumerate(layers)
         }
 
     def forward(

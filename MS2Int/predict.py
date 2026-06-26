@@ -1,5 +1,6 @@
 import atexit
 import argparse
+import gc
 import os
 import tempfile
 
@@ -45,6 +46,20 @@ parser.add_argument(
     required=True,
     help="Output HDF5 path",
 )
+parser.add_argument(
+    "--predict_key",
+    "--dataset_name",
+    dest="predict_key",
+    default="Intpredict",
+    help="Prediction dataset name written to output HDF5",
+)
+parser.add_argument("--batch_size", type=int, default=1024, help="Inference batch size")
+parser.add_argument("--num_workers", type=int, default=8, help="DataLoader workers")
+parser.add_argument(
+    "--overwrite",
+    action="store_true",
+    help="Overwrite prediction dataset when it already exists",
+)
 args = parser.parse_args()
 
 REQUIRED_COLS = ["Sequence", "Length", "Charge", "collision_energy", "Fragmentation"]
@@ -79,6 +94,7 @@ def _csv_to_h5(csv_path: str, h5_path: str) -> None:
 checkpoint_path = args.checkpoint_path
 raw_input_path = args.input_path
 output_path = args.output_path
+predict_key = args.predict_key
 
 _tmp_h5 = None
 ext = os.path.splitext(raw_input_path)[1].lower()
@@ -91,11 +107,12 @@ if ext in (".csv", ".tsv"):
 else:
     input_path = raw_input_path
 
-batch_size = 1024
-num_workers = 8
-gpu_id = "0"
+batch_size = args.batch_size
+num_workers = args.num_workers
 
-os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+# 不覆盖外部传入的 CUDA_VISIBLE_DEVICES；例如 CUDA_VISIBLE_DEVICES=6 时，
+# 进程内的 cuda:0 会映射到物理 GPU6。
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
 Mamba_Config = MambaConfig(
     d_model=512,
@@ -117,30 +134,82 @@ epoch, val_loss = load_checkpoint(checkpoint_path, model)
 model = model.to(device)
 
 
-def test(model, test_loader, device):
+def test(model, test_loader, device, valid_indices, total_samples, prediction_path):
     model.eval()
-    all_y_outputs = []
     test_progress = tqdm(test_loader, ncols=30, desc="Testing")
+    pred_ds = None
+    written = 0
 
-    with torch.inference_mode():
-        for batch in test_progress:
-            inst, charge, ce, seq, lengths = batch
-            inst = inst.to(device, non_blocking=True)
-            charge = charge.to(device, non_blocking=True)
-            ce = ce.to(device, non_blocking=True)
-            seq = seq.to(device, non_blocking=True)
+    with h5py.File(prediction_path, "w") as pred_file:
+        with torch.inference_mode():
+            for batch in test_progress:
+                inst, charge, ce, seq, lengths = batch
+                inst = inst.to(device, non_blocking=True)
+                charge = charge.to(device, non_blocking=True)
+                ce = ce.to(device, non_blocking=True)
+                seq = seq.to(device, non_blocking=True)
 
-            outputs = model(inst, charge, ce, seq)
-            masks = create_batch_loss_masks(lengths.tolist()).to(
-                device, non_blocking=True
-            )
-            outputs[outputs < 0] = 0
-            outputs = outputs * masks
-            all_y_outputs.append(outputs.cpu())
+                outputs = model(inst, charge, ce, seq)
+                masks = create_batch_loss_masks(lengths.tolist()).to(
+                    device, non_blocking=True
+                )
+                outputs[outputs < 0] = 0
+                outputs = outputs * masks
+                outputs_np = outputs.cpu().numpy().astype(np.float32, copy=False)
 
-    all_y_outputs = torch.cat(all_y_outputs, dim=0)
-    print(f"Completed testing, total samples: {all_y_outputs.shape[0]}")
-    return all_y_outputs
+                if pred_ds is None:
+                    pred_shape = (total_samples,) + tuple(outputs_np.shape[1:])
+                    chunk_rows = min(batch_size, total_samples)
+                    pred_ds = pred_file.create_dataset(
+                        predict_key,
+                        shape=pred_shape,
+                        dtype=np.float32,
+                        chunks=(chunk_rows,) + tuple(outputs_np.shape[1:]),
+                    )
+
+                batch_rows = valid_indices[written : written + outputs_np.shape[0]]
+                pred_ds[batch_rows] = outputs_np
+                written += outputs_np.shape[0]
+
+    print(f"Completed testing, total samples: {written}")
+
+
+def _copy_prediction_to_output(
+    input_path: str,
+    output_path: str,
+    prediction_path: str,
+    predict_key: str,
+    overwrite: bool,
+) -> None:
+    same_file = os.path.abspath(output_path) == os.path.abspath(input_path)
+    output_exists = os.path.exists(output_path)
+
+    if same_file or output_exists:
+        with h5py.File(output_path, "a") as output_file, h5py.File(
+            prediction_path, "r"
+        ) as pred_file:
+            if predict_key in output_file:
+                if not overwrite:
+                    raise KeyError(
+                        f"输出 H5 已存在数据集 {predict_key!r}；如需覆盖请添加 --overwrite"
+                    )
+                del output_file[predict_key]
+            pred_file.copy(predict_key, output_file, name=predict_key)
+        return
+
+    with (
+        h5py.File(input_path, "r") as input_file,
+        h5py.File(output_path, "w") as output_file,
+        h5py.File(prediction_path, "r") as pred_file,
+    ):
+        for attr_key, attr_value in input_file.attrs.items():
+            output_file.attrs[attr_key] = attr_value
+        for key in input_file.keys():
+            # 输入里可能已有与 predict_key 同名的旧预测；应用新预测前不要复制该键
+            if key == predict_key:
+                continue
+            input_file.copy(key, output_file, name=key)
+        pred_file.copy(predict_key, output_file, name=predict_key)
 
 
 output_dir = os.path.dirname(output_path)
@@ -197,33 +266,25 @@ test_loader = DataLoader(
     filtered_dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=True
 )
 
-all_y_outputs = test(model, test_loader, device)
-
-with h5py.File(input_path, "r") as f_in:
-    total_samples = f_in["Length"].shape[0]
-
-full_pred = np.zeros(
-    (total_samples,) + tuple(all_y_outputs.shape[1:]), dtype=np.float32
+valid_indices = np.asarray(valid_indices, dtype=np.int64)
+prediction_tmp = tempfile.NamedTemporaryFile(
+    suffix=f".{predict_key}.h5",
+    prefix="ms2int_pred_",
+    dir=output_dir if output_dir else None,
+    delete=False,
 )
-full_pred[valid_indices] = all_y_outputs.numpy()
-
-if os.path.abspath(output_path) == os.path.abspath(input_path):
-    with h5py.File(input_path, "a") as f:
-        if "Intpredict" in f:
-            del f["Intpredict"]
-        f.create_dataset("Intpredict", data=full_pred)
-else:
-    with (
-        h5py.File(input_path, "r") as input_file,
-        h5py.File(output_path, "w") as output_file,
-    ):
-        for key in input_file.keys():
-            data = input_file[key][:]
-            output_file.create_dataset(key, data=data)
-
-            if "description" in input_file[key].attrs:
-                output_file[key].attrs["description"] = input_file[key].attrs[
-                    "description"
-                ]
-
-        output_file.create_dataset("Intpredict", data=full_pred)
+prediction_tmp.close()
+try:
+    test(model, test_loader, device, valid_indices, total_samples, prediction_tmp.name)
+    del test_loader, filtered_dataset, original_dataset
+    gc.collect()
+    _copy_prediction_to_output(
+        input_path=input_path,
+        output_path=output_path,
+        prediction_path=prediction_tmp.name,
+        predict_key=predict_key,
+        overwrite=args.overwrite,
+    )
+finally:
+    if os.path.exists(prediction_tmp.name):
+        os.remove(prediction_tmp.name)

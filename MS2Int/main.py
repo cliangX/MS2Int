@@ -9,14 +9,18 @@ try:
     from .utils import *
     from .datasets import CustomDataset
     from .vat import VATLoss
+    from .reference_fallback import enable_reference_fallback
 except ImportError:  # pragma: no cover
     from hparams import get_hparams
     from model import MambaLMHeadModel
     from utils import *
     from datasets import CustomDataset
     from vat import VATLoss
+    from reference_fallback import enable_reference_fallback
 
 config = get_hparams()
+if config.reference_fallback:
+    enable_reference_fallback()
 
 try:
     import setproctitle
@@ -117,40 +121,82 @@ def cleanup():
 
 
 def train(rank, world_size, Mamba_Config):
+    torch.cuda.set_device(rank)
     setup(rank, world_size)
     device = torch.device(f"cuda:{rank}")
 
     model = MambaLMHeadModel(Mamba_Config).to(device)
+
+    # ---------- resume: 先在未被 DDP 包装的原始模型上加载 state_dict ----------
+    resume_ckpt = None
+    resume_last_epoch = -1
+    resume_best_val_loss = None
+    if getattr(config, "pth", "") and os.path.isfile(config.pth):
+        resume_ckpt = torch.load(config.pth, map_location=device, weights_only=False)
+        resumed_model_state = {
+            k.replace("module.", ""): v
+            for k, v in resume_ckpt["model_state_dict"].items()
+        }
+        try:
+            model.load_state_dict(resumed_model_state)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "Checkpoint 与当前模型结构不兼容（d_model/n_layer/vocab 等需一致）。"
+                f"原始错误: {exc}"
+            ) from exc
+        resume_last_epoch = int(resume_ckpt["epoch"])
+        resume_best_val_loss = float(resume_ckpt["val_loss"])
+        if rank == 0:
+            logging.info(
+                f"[Resume] Loaded model weights from '{config.pth}' "
+                f"(last_epoch={resume_last_epoch}, val_loss={resume_best_val_loss:.4f})."
+            )
+    elif getattr(config, "pth", ""):
+        raise FileNotFoundError(f"--pth 指定的 checkpoint 不存在: {config.pth}")
+    # --------------------------------------------------------------------------
+
     params_df = count_parameters(model)
-    logging.info(params_df)
+    if rank == 0:
+        logging.info(params_df)
     model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     vat_loss_fn = VATLoss(eps=config.vat_eps, xi=config.vat_xi, ip=config.vat_ip)
 
-    dataset = CustomDataset(config.train_data_path)
-    total_samples = len(dataset)
-    train_size = int(config.train_data_size * total_samples)
-    val_size = total_samples - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    train_dataset = CustomDataset(config.train_data_path, preload=config.preload)
+    if config.val_data_path:
+        val_dataset = CustomDataset(config.val_data_path, preload=config.preload)
+        if rank == 0:
+            logging.info(f"独立验证集: {config.val_data_path} ({len(val_dataset)} 样本)")
+    else:
+        total_samples = len(train_dataset)
+        train_size = int(config.train_data_size * total_samples)
+        val_size = total_samples - train_size
+        split_generator = torch.Generator().manual_seed(42)
+        train_dataset, val_dataset = random_split(train_dataset, [train_size, val_size], generator=split_generator)
 
     train_sampler = DistributedSampler(
         train_dataset, num_replicas=world_size, rank=rank, shuffle=True
     )
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
+    _persistent = config.num_workers > 0
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.train_batch_size,
         sampler=train_sampler,
         num_workers=config.num_workers,
         pin_memory=True,
+        persistent_workers=_persistent,
+        prefetch_factor=4 if _persistent else None,
     )
 
-    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.val_batch_size,
         sampler=val_sampler,
         num_workers=config.num_workers,
         pin_memory=True,
+        persistent_workers=_persistent,
+        prefetch_factor=4 if _persistent else None,
     )
 
     optimizer = torch.optim.Adam(
@@ -161,8 +207,43 @@ def train(rank, world_size, Mamba_Config):
     )
 
     best_val_loss = 99999
+    start_epoch = 0
+
+    # ---------- resume: 恢复 optimizer 状态，并推进 lr_scheduler 到对应步数 ----------
+    if resume_ckpt is not None:
+        if "optimizer_state_dict" not in resume_ckpt:
+            raise KeyError(
+                f"Checkpoint '{config.pth}' 缺少 optimizer_state_dict，无法恢复优化器状态。"
+            )
+        optimizer.load_state_dict(resume_ckpt["optimizer_state_dict"])
+        # Adam 内部缓存 (exp_avg/exp_avg_sq) 需要和当前 device 一致
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
+
+        start_epoch = resume_last_epoch + 1
+        best_val_loss = resume_best_val_loss
+
+        # CosineWarmupScheduler 基于 step 计数，推进到已训练步数
+        steps_to_advance = start_epoch * len(train_loader)
+        for _ in range(steps_to_advance):
+            lr_scheduler.step()
+        if rank == 0:
+            current_lr = optimizer.param_groups[0]["lr"]
+            logging.info(
+                f"[Resume] Optimizer state restored; advanced lr_scheduler by "
+                f"{steps_to_advance} steps; start_epoch={start_epoch}; "
+                f"best_val_loss={best_val_loss:.4f}; current_lr={current_lr:.3e}."
+            )
+        # 释放 checkpoint 内存
+        del resume_ckpt
+        torch.cuda.empty_cache()
+    # -------------------------------------------------------------------------------
+
     max_epochs = config.max_epochs
-    for epoch in range(max_epochs):
+    for epoch in range(start_epoch, max_epochs):
+        train_sampler.set_epoch(epoch)
         model.train()
         epoch_loss = 0.0
 
@@ -182,8 +263,6 @@ def train(rank, world_size, Mamba_Config):
             outputs = model(batch[0], batch[1], batch[2], batch[3])
 
             masks = create_batch_loss_masks(batch[4]).to(device)
-            t = batch[-1]
-            t[t == 0] = -1
 
             base_pred = outputs.detach()
 
@@ -246,9 +325,6 @@ def validate(rank, world_size, model, val_loader, device):
             batch = [t.to(device) for t in batch]
             outputs = model(batch[0], batch[1], batch[2], batch[3])
             masks = create_batch_loss_masks(batch[4]).to(device)
-
-            t = batch[-1]
-            t[t == 0] = -1
 
             outputs = outputs * masks
             tgt_train_data = batch[-1] * masks

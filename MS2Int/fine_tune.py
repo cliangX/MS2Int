@@ -117,6 +117,7 @@ def cleanup():
 
 
 def train(rank, world_size, Mamba_Config):
+    torch.cuda.set_device(rank)
     setup(rank, world_size)
     device = torch.device(f"cuda:{rank}")
 
@@ -126,35 +127,47 @@ def train(rank, world_size, Mamba_Config):
     model = model.to(device)
 
     params_df = count_parameters(model)
-    logging.info(params_df)
+    if rank == 0:
+        logging.info(params_df)
     model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     vat_loss_fn = VATLoss(eps=config.vat_eps, xi=config.vat_xi, ip=config.vat_ip)
 
-    dataset = CustomDataset(config.train_data_path)
-    total_samples = len(dataset)
-    train_size = int(config.train_data_size * total_samples)
-    val_size = total_samples - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    train_dataset = CustomDataset(config.train_data_path)
+    if config.val_data_path:
+        val_dataset = CustomDataset(config.val_data_path)
+        if rank == 0:
+            logging.info(f"独立验证集: {config.val_data_path} ({len(val_dataset)} 样本)")
+    else:
+        total_samples = len(train_dataset)
+        train_size = int(config.train_data_size * total_samples)
+        val_size = total_samples - train_size
+        split_generator = torch.Generator().manual_seed(42)
+        train_dataset, val_dataset = random_split(train_dataset, [train_size, val_size], generator=split_generator)
 
     train_sampler = DistributedSampler(
         train_dataset, num_replicas=world_size, rank=rank, shuffle=True
     )
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
+    _persistent = config.num_workers > 0
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.train_batch_size,
         sampler=train_sampler,
         num_workers=config.num_workers,
         pin_memory=True,
+        persistent_workers=_persistent,
+        prefetch_factor=4 if _persistent else None,
     )
 
-    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.val_batch_size,
         sampler=val_sampler,
         num_workers=config.num_workers,
         pin_memory=True,
+        persistent_workers=_persistent,
+        prefetch_factor=4 if _persistent else None,
     )
 
     optimizer = torch.optim.Adam(
@@ -167,6 +180,7 @@ def train(rank, world_size, Mamba_Config):
     best_val_loss = 99999
     max_epochs = config.max_epochs
     for epoch in range(max_epochs):
+        train_sampler.set_epoch(epoch)
         model.train()
         epoch_loss = 0.0
 
@@ -186,8 +200,6 @@ def train(rank, world_size, Mamba_Config):
             outputs = model(batch[0], batch[1], batch[2], batch[3])
 
             masks = create_batch_loss_masks(batch[4]).to(device)
-            t = batch[-1]
-            t[t == 0] = -1
 
             base_pred = outputs.detach()
 
@@ -250,9 +262,6 @@ def validate(rank, world_size, model, val_loader, device):
             batch = [t.to(device) for t in batch]
             outputs = model(batch[0], batch[1], batch[2], batch[3])
             masks = create_batch_loss_masks(batch[4]).to(device)
-
-            t = batch[-1]
-            t[t == 0] = -1
 
             outputs = outputs * masks
             tgt_train_data = batch[-1] * masks

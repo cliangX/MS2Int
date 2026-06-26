@@ -17,6 +17,12 @@ def get_hparams():
         help="Training data path (H5)",
     )
     parser.add_argument(
+        "--val_data_path",
+        type=str,
+        default="",
+        help="独立验证集 H5 路径，为空则从 train H5 按比例切分",
+    )
+    parser.add_argument(
         "--fine_tune",
         type=str,
         default="data/finetune.h5",
@@ -90,6 +96,19 @@ def get_hparams():
     )
     parser.add_argument(
         "--vat_ip", type=int, default=1, help="VAT power iteration steps"
+    )
+
+    parser.add_argument(
+        "--preload",
+        action="store_true",
+        default=False,
+        help="将整个 H5 一次性加载到内存，适合内存充足的机器以加速 IO",
+    )
+    parser.add_argument(
+        "--reference_fallback",
+        action="store_true",
+        default=False,
+        help="启用参考实现回退，绕开不支持当前 GPU 的 Mamba2 Triton fused kernel",
     )
 
     parser.add_argument(
