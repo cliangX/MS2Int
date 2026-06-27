@@ -7,7 +7,7 @@ Usage:
     python run.py --msms msms.txt --mzml-dir ./mzml --output ./out/train.h5
 
 Steps:
-    1. Split msms.txt by raw file and filter (mode-specific, length <= 30)
+    1. Split msms.txt by raw file and filter (mode-specific, length <= 40)
     2. Match theoretical fragments to experimental spectra
     3. Generate training data matrices
     4. Merge into final HDF5

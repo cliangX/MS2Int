@@ -5,6 +5,9 @@ import warnings
 
 warnings.filterwarnings('ignore', category=pd.errors.DtypeWarning)
 
+MAX_PEPTIDE_LENGTH = 40
+
+
 def run_step1(config):
     mode = str(config.get("mode", "unmodified")).strip().lower()
     COMBINED_MSMS_PATH = config['paths'].get('msms') or config['paths']['combined_msms']
@@ -87,7 +90,7 @@ def run_step1(config):
                 )
                 no_u = ~seq_str.str.contains('U', regex=False)
 
-                df = df[is_keep & (df['Length'] <= 30) & no_u]
+                df = df[is_keep & (df['Length'] <= MAX_PEPTIDE_LENGTH) & no_u]
             else:
                 is_unmodified = mods.astype(str).str.strip().eq('Unmodified')
                 seq_str = df.get('Sequence')
@@ -98,7 +101,7 @@ def run_step1(config):
                 )
                 no_u = ~seq_str.str.contains('U', regex=False)
 
-                df = df[is_unmodified & (df['Length'] <= 30) & no_u]
+                df = df[is_unmodified & (df['Length'] <= MAX_PEPTIDE_LENGTH) & no_u]
             after = len(df)
             output_path = os.path.join(FILTERED_MSMS_DIR, file_name)
             df.to_csv(output_path, sep='\t', index=False)

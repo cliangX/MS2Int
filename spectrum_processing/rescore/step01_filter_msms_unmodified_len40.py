@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Filter msms.txt: keep Unmodified, Length<=30, no selenocysteine (U)."""
+"""Filter msms.txt: keep Unmodified, Length<=40, no selenocysteine (U)."""
 
 import argparse
 import os
@@ -16,7 +16,7 @@ def build_output_path(input_path: str, output_path: str | None) -> str:
     root, ext = os.path.splitext(input_path)
     if not ext:
         ext = ".txt"
-    return f"{root}.filtered_unmodified_lenle30{ext}"
+    return f"{root}.filtered_unmodified_lenle40{ext}"
 
 
 def filter_chunk(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int]]:
@@ -39,7 +39,7 @@ def filter_chunk(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int]]:
     stats["removed_by_modifications"] = removed_mods
 
     length_num = pd.to_numeric(df["Length"], errors="coerce")
-    is_len_ok = length_num.le(30)
+    is_len_ok = length_num.le(40)
     removed_length = (~is_len_ok).sum()
     stats["removed_by_length"] = removed_length
 

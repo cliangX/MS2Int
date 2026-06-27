@@ -17,7 +17,7 @@ def process_file(path, dataset_name):
         df = pd.read_hdf(path, "combined_data")
         df["dataset"] = dataset_name
         return df
-    except (FileNotFoundError, OSError, KeyError, ValueError) as e:
+    except Exception as e:
         print(f"Failed to read {path}: {e}")
         return None
     finally:
@@ -65,103 +65,100 @@ def run_step4(config):
         dset = f.create_dataset(
             "dataset", data=combined_df["dataset"].astype(str).values.astype("S")
         )
-        dset.attrs["description"] = "Dataset name"
+        dset.attrs["description"] = "数据集名称"
 
         dset = f.create_dataset(
             "Sequence", data=combined_df["Sequence"].astype(str).values.astype("S")
         )
-        dset.attrs["description"] = "Peptide sequence"
+        dset.attrs["description"] = "肽链的序列信息"
 
         dset = f.create_dataset("Length", data=combined_df["Length"].tolist())
-        dset.attrs["description"] = "Peptide length"
+        dset.attrs["description"] = "肽链的长度"
 
         dset = f.create_dataset(
             "Modifications",
             data=combined_df["Modifications"].astype(str).values.astype("S"),
         )
-        dset.attrs["description"] = "Modifications"
+        dset.attrs["description"] = "肽链的修饰信息"
 
         dset = f.create_dataset(
             "Mass_analyzer",
             data=combined_df["Mass analyzer"].astype(str).values.astype("S"),
         )
-        dset.attrs["description"] = "Mass analyzer type"
+        dset.attrs["description"] = "HCD"
 
         dset = f.create_dataset(
             "Fragmentation",
             data=combined_df["Fragmentation"].astype(str).values.astype("S"),
         )
-        dset.attrs["description"] = "Fragmentation method"
+        dset.attrs["description"] = "FTIM"
 
         dset = f.create_dataset(
             "Modified_sequence",
             data=combined_df["Modified_sequence"].astype(str).values.astype("S"),
         )
-        dset.attrs["description"] = "Modified peptide sequence"
+        dset.attrs["description"] = "包含修饰的完整肽链序列"
 
         dset = f.create_dataset("Charge", data=combined_df["Charge"].tolist())
-        dset.attrs["description"] = "Charge state"
+        dset.attrs["description"] = "肽链的电荷状态"
         dset = f.create_dataset(
             "MS2_Scan_Number", data=combined_df["MS2_Scan_Number"].tolist()
         )
-        dset.attrs["description"] = "MS2 scan number"
+        dset.attrs["description"] = "二级质谱扫描的编号"
         dset = f.create_dataset("Score", data=combined_df["Score"].tolist())
-        dset.attrs["description"] = "Identification score"
+        dset.attrs["description"] = "肽链鉴定的分数"
 
         dset = f.create_dataset(
             "Raw_file", data=combined_df["Raw_file"].astype(str).values.astype("S")
         )
-        dset.attrs["description"] = "Raw file name"
+        dset.attrs["description"] = "原始数据文件的名称"
 
         dset = f.create_dataset(
             "annotate", data=combined_df["annotate"].astype(str).values.astype("S")
         )
-        dset.attrs["description"] = "ProForma annotation"
+        dset.attrs["description"] = "附加的注释信息"
 
         dset = f.create_dataset("RT", data=combined_df["RT"].tolist())
-        dset.attrs["description"] = "Retention time"
+        dset.attrs["description"] = "肽链在色谱中的保留时间"
 
         dset = f.create_dataset(
             "instrument", data=combined_df["instrument"].astype(str).values.astype("S")
         )
-        dset.attrs["description"] = "Instrument name"
+        dset.attrs["description"] = "使用的质谱仪器"
         dset = f.create_dataset(
             "collision_energy", data=combined_df["collision_energy"].tolist()
         )
-        dset.attrs["description"] = "Collision energy"
-        
+        dset.attrs["description"] = "在MS2实验中使用的碰撞能量"
+
         dset = f.create_dataset(
             "Reverse", data=combined_df["Reverse"].astype(str).values.astype("S")
         )
-        dset.attrs["description"] = "Reverse decoy flag"
-        
+        dset.attrs["description"] = "反向数据库匹配标记"
+
         tmp = combined_df["train_data"].tolist()
         tmp = rearrange(tmp, "n h w -> n w h")
         dset = f.create_dataset("train_data", data=tmp)
-        dset.attrs["description"] = "Training intensity matrix"
+        dset.attrs["description"] = "用于训练模型的数据（train40: 单条 39x41）"
 
         f.close()
         print(f"Created output file: {output_file}")
 
-    def main():
-        file_paths = get_file_paths(ylabel_df_dir)
-        num_batches = (len(file_paths) + batch_size - 1) // batch_size
+    file_paths = get_file_paths(ylabel_df_dir)
+    num_batches = (len(file_paths) + batch_size - 1) // batch_size
 
-        for batch_idx in range(num_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min(start_idx + batch_size, len(file_paths))
-            batch_file_paths = file_paths[start_idx:end_idx]
-            print(
-                f"Processing batch {batch_idx + 1}/{num_batches} with {len(batch_file_paths)} files"
-            )
-            process_batch(batch_file_paths, batch_idx)
+    for batch_idx in range(num_batches):
+        start_idx = batch_idx * batch_size
+        end_idx = min(start_idx + batch_size, len(file_paths))
+        batch_file_paths = file_paths[start_idx:end_idx]
+        print(
+            f"Processing batch {batch_idx + 1}/{num_batches} with {len(batch_file_paths)} files"
+        )
+        process_batch(batch_file_paths, batch_idx)
 
-    main()
+    print("3.4完成")
 
 
 if __name__ == "__main__":
-    import os
-
     import yaml
 
     cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")

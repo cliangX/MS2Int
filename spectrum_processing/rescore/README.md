@@ -21,7 +21,7 @@ Output: `WORKDIR/rescore/mokapot/`
 
 ## Scripts
 
-- **step01_filter_msms_unmodified_len30.py** — Filter msms.txt (Unmodified, Length<=30, no selenocysteine)
+- **step01_filter_msms_unmodified_len40.py** — Filter msms.txt (Unmodified, Length<=40, no selenocysteine)
 - **step02_make_msms_specid.py** — Generate SpecId TSV from Raw file / Scan number / Sequence / Charge
 - **step03_calc_ms2pip_features_m.py** — Compute MS2PIP features (with m-ions; auto-generates SpecId if missing)
 - **step04_rescore_mamba_ms2pip_m.py** — Two-stage mokapot rescoring (Phase 2 adds Basic/MaxQuant by default)
@@ -42,7 +42,7 @@ WORKDIR/
 
 ### Output (WORKDIR/rescore/)
 
-- `1.msms_filtered_unmodified_lenle30.txt`
+- `1.msms_filtered_unmodified_lenle40.txt`
 - `msms_specid.tsv`
 - `rescore_batch1.h5` (from `spectrum_processing/unmodficaiton/run.py`)
 - `rescore.h5` (with `Intpredict` from `MS2Int/predict.py`)
@@ -58,15 +58,15 @@ Run from the MS2Int repo root with conda env `mamba_dev`.
 
 1) Filter msms.txt
 ```bash
-conda run -n mamba_dev python spectrum_processing/rescore/step01_filter_msms_unmodified_len30.py \
+conda run -n mamba_dev python spectrum_processing/rescore/step01_filter_msms_unmodified_len40.py \
   -i /path/to/WORKDIR/txt/msms.txt \
-  -o /path/to/WORKDIR/rescore/1.msms_filtered_unmodified_lenle30.txt
+  -o /path/to/WORKDIR/rescore/1.msms_filtered_unmodified_lenle40.txt
 ```
 
 2) Generate SpecId TSV
 ```bash
 conda run -n mamba_dev python spectrum_processing/rescore/step02_make_msms_specid.py \
-  /path/to/WORKDIR/rescore/1.msms_filtered_unmodified_lenle30.txt \
+  /path/to/WORKDIR/rescore/1.msms_filtered_unmodified_lenle40.txt \
   /path/to/WORKDIR/rescore/msms_specid.tsv
 ```
 
@@ -74,7 +74,7 @@ conda run -n mamba_dev python spectrum_processing/rescore/step02_make_msms_speci
 ```bash
 cd /path/to/WORKDIR
 conda run -n mamba_dev python /path/to/MS2Int/spectrum_processing/unmodficaiton/run.py \
-  --msms rescore/1.msms_filtered_unmodified_lenle30.txt \
+  --msms rescore/1.msms_filtered_unmodified_lenle40.txt \
   --mzml-dir mzml \
   --dataset-name rescore \
   --output rescore/rescore_batch1.h5
@@ -102,7 +102,7 @@ conda run -n mamba_dev python /path/to/MS2Int/spectrum_processing/rescore/step03
 ```bash
 cd /path/to/WORKDIR
 conda run -n mamba_dev python /path/to/MS2Int/spectrum_processing/rescore/step04_rescore_mamba_ms2pip_m.py \
-  --msms_path rescore/1.msms_filtered_unmodified_lenle30.txt \
+  --msms_path rescore/1.msms_filtered_unmodified_lenle40.txt \
   --tsv_path rescore/.features_tmp/ms2pip_features_m.tsv \
   --rng 42 --folds 2 --max_workers 2 -v
 ```

@@ -39,18 +39,18 @@ cleanup_feature_tmp() {
 trap cleanup_feature_tmp EXIT
 
 echo "[Step 1/6] Filter msms.txt"
-conda run -n "${CONDA_ENV}" python "${REPO_ROOT}/spectrum_processing/rescore/step01_filter_msms_unmodified_len30.py" \
+conda run -n "${CONDA_ENV}" python "${REPO_ROOT}/spectrum_processing/rescore/step01_filter_msms_unmodified_len40.py" \
   -i "txt/msms.txt" \
-  -o "rescore/1.msms_filtered_unmodified_lenle30.txt"
+  -o "rescore/1.msms_filtered_unmodified_lenle40.txt"
 
 echo "[Step 2/6] Generate SpecId TSV"
 conda run -n "${CONDA_ENV}" python "${REPO_ROOT}/spectrum_processing/rescore/step02_make_msms_specid.py" \
-  "rescore/1.msms_filtered_unmodified_lenle30.txt" \
+  "rescore/1.msms_filtered_unmodified_lenle40.txt" \
   "rescore/msms_specid.tsv"
 
 echo "[Step 3/6] Build rescore_batch1.h5"
 conda run -n "${CONDA_ENV}" python "${REPO_ROOT}/spectrum_processing/unmodficaiton/run.py" \
-  --msms "rescore/1.msms_filtered_unmodified_lenle30.txt" \
+  --msms "rescore/1.msms_filtered_unmodified_lenle40.txt" \
   --mzml-dir "mzml" \
   --dataset-name "rescore" \
   --output "rescore/rescore_batch1.h5"
@@ -73,7 +73,7 @@ conda run -n "${CONDA_ENV}" python "${REPO_ROOT}/spectrum_processing/rescore/ste
 echo "[Step 6/6] Mokapot rescoring"
 env TF_CPP_MIN_LOG_LEVEL=3 CUDA_VISIBLE_DEVICES="" \
 conda run -n "${CONDA_ENV}" python "${REPO_ROOT}/spectrum_processing/rescore/step04_rescore_mamba_ms2pip_m.py" \
-  --msms_path "rescore/1.msms_filtered_unmodified_lenle30.txt" \
+  --msms_path "rescore/1.msms_filtered_unmodified_lenle40.txt" \
   --tsv_path "${MS2PIP_TSV}" \
   --rng 42 --folds 2 --max_workers 2 \
   -v

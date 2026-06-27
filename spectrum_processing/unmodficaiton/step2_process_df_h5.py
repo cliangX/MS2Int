@@ -32,6 +32,64 @@ warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.filterwarnings("ignore", category=pd.errors.DtypeWarning)
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
+
+def _is_valid_combined_h5(path: str) -> bool:
+    """判断 step2 输出的 h5 是否完整可用。"""
+    if not os.path.isfile(path):
+        return False
+    try:
+        if os.path.getsize(path) <= 0:
+            return False
+    except OSError:
+        return False
+
+    try:
+        import tables
+
+        with tables.open_file(path, mode="r") as h5:
+            if "/combined_data" not in h5:
+                return False
+            node = h5.get_node("/combined_data")
+            children = set(getattr(node, "_v_children", {}).keys())
+            for axis in ("axis0", "axis1"):
+                if axis not in children:
+                    return False
+                if not hasattr(node._v_attrs, f"{axis}_variety"):
+                    return False
+            try:
+                nblocks = int(getattr(node._v_attrs, "nblocks"))
+            except Exception:
+                nblocks = None
+            if nblocks is not None:
+                for i in range(nblocks):
+                    items = f"block{i}_items"
+                    values = f"block{i}_values"
+                    if items not in children or values not in children:
+                        return False
+                    if not hasattr(node._v_attrs, f"{items}_variety"):
+                        return False
+        return True
+    except Exception:
+        try:
+            with pd.HDFStore(path, mode="r") as store:
+                return "/combined_data" in store.keys()
+        except Exception:
+            return False
+
+
+def _atomic_to_hdf(df: pd.DataFrame, output_path: str, key: str) -> None:
+    tmp_path = output_path + ".tmp"
+    try:
+        df.to_hdf(tmp_path, key=key, mode="w")
+        os.replace(tmp_path, output_path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
 mod_transform = {
     r"(Oxidation (M))": "[Oxidation]",
     r"(Acetyl (Protein N-term))": "[Acetyl]-",
@@ -539,8 +597,9 @@ def process_pair(meta_path, mz_path, msms_root, df_h5_dir, inner_num_procs=4, mo
             verbose=False,
             mode=mode,
         )
-        output_path = os.path.join(df_h5_dir, meta_df["Raw_file"].iloc[0] + ".h5")
-        combined_df.to_hdf(output_path, key="combined_data", mode="w")
+        output_stem = os.path.splitext(os.path.basename(meta_path))[0]
+        output_path = os.path.join(df_h5_dir, output_stem + ".h5")
+        _atomic_to_hdf(combined_df, output_path, key="combined_data")
         print(f"Processed and saved: {output_path}")
         gc.collect()
         return True
@@ -559,69 +618,88 @@ def run_step2(config):
 
     os.makedirs(df_h5_dir, exist_ok=True)
 
-    search_files = [
-        os.path.join(search_root, f)
-        for f in os.listdir(search_root)
-        if f.endswith(".txt")
-    ]
-    search_files.sort()
+    def _norm_stem(stem: str) -> str:
+        s = str(stem).strip().lower()
+        if s.endswith(".raw"):
+            s = s[:-4]
+        if s.endswith(".mzml"):
+            s = s[:-5]
+        return s
 
-    mzml_names = [f for f in os.listdir(mzml_root) if f.lower().endswith(".mzml")]
-    mzml_names.sort()
-    mzml_map = {os.path.splitext(f)[0]: os.path.join(mzml_root, f) for f in mzml_names}
+    mzml_by_norm = {}
+    for fn in os.listdir(mzml_root):
+        if not fn.lower().endswith(".mzml"):
+            continue
+        stem = os.path.splitext(fn)[0]
+        key = _norm_stem(stem)
+        mzml_by_norm.setdefault(key, []).append(os.path.join(mzml_root, fn))
 
-    valid_pairs = []
+    search_entries = sorted(fn for fn in os.listdir(search_root) if fn.endswith(".txt"))
+
     valid_mzml_files = []
     valid_search_files = []
 
-    for search_path in search_files:
-        experiment_name = os.path.splitext(os.path.basename(search_path))[0]
-
-        mzml_path = mzml_map.get(experiment_name)
-        if mzml_path is None:
-            # Fallback: allow substring matching for backward compatibility
-            candidates = [
-                os.path.join(mzml_root, f)
-                for f in mzml_names
-                if experiment_name in f
-            ]
-            if not candidates:
-                print(f"Warning: No mzML file found for {experiment_name}")
-                continue
-            candidates.sort()
+    for fn in search_entries:
+        stem = os.path.splitext(fn)[0]
+        key = _norm_stem(stem)
+        candidates = mzml_by_norm.get(key, [])
+        search_path = os.path.join(search_root, fn)
+        if len(candidates) == 1:
+            valid_search_files.append(search_path)
+            valid_mzml_files.append(candidates[0])
+        elif len(candidates) == 0:
             if mode == "phospho":
-                print(
-                    f"Warning: phospho mode - no exact mzML match found, using substring match: {experiment_name} -> {os.path.basename(candidates[0])}"
-                )
-            if len(candidates) > 1:
-                print(
-                    f"Warning: Multiple mzML candidates for {experiment_name}, use: {os.path.basename(candidates[0])}"
-                )
-            mzml_path = candidates[0]
+                fallback = [
+                    os.path.join(mzml_root, f)
+                    for f in os.listdir(mzml_root)
+                    if f.lower().endswith(".mzml") and stem in os.path.splitext(f)[0]
+                ]
+                if fallback:
+                    fallback.sort()
+                    print(
+                        f"Warning: phospho mode - no exact mzML match, using substring: {stem} -> {os.path.basename(fallback[0])}"
+                    )
+                    valid_search_files.append(search_path)
+                    valid_mzml_files.append(fallback[0])
+                    continue
+            print(f"Warning: No mzML file found for {stem}")
+        else:
+            print(f"Warning: Multiple mzML files found for {stem}:")
+            for p in candidates:
+                print(f"  - {p}")
 
-        valid_search_files.append(search_path)
-        valid_mzml_files.append(mzml_path)
-        valid_pairs.append((experiment_name, search_path, mzml_path))
+    print(f"Found {len(valid_search_files)} valid file pairs to process")
 
-    print(f"Found {len(valid_pairs)} valid file pairs to process")
+    force = str(os.environ.get("FORCE", "0")).strip() == "1"
+    inner_num_procs = num_work
 
-    def main_process(search_files, mzml_files):
-        inner_num_procs = 32
+    results = []
+    for search_file, mzml_file in tqdm(
+        zip(valid_search_files, valid_mzml_files),
+        total=len(valid_search_files),
+        desc="Processing files",
+    ):
+        stem = os.path.splitext(os.path.basename(search_file))[0]
+        expected_out = os.path.join(df_h5_dir, stem + ".h5")
+        if (not force) and _is_valid_combined_h5(expected_out):
+            print(f"[SKIP] 已存在：{expected_out}")
+            results.append(True)
+            continue
 
-        results = []
-        for search_file, mzml_file in tqdm(
-            zip(search_files, mzml_files), total=len(search_files), desc="Processing files"
-        ):
-            result = process_pair(
-                search_file, mzml_file, msms_root, df_h5_dir, inner_num_procs, mode=mode
-            )
-            results.append(result)
-            gc.collect()
+        result = process_pair(
+            search_file,
+            mzml_file,
+            msms_root,
+            df_h5_dir,
+            inner_num_procs,
+            mode=mode,
+        )
+        results.append(result)
+        gc.collect()
 
-        successful = sum(1 for r in results if r)
-        print(f"Successfully processed {successful} out of {len(results)} file pairs")
-
-    main_process(valid_search_files, valid_mzml_files)
+    successful = sum(1 for r in results if r)
+    print(f"Successfully processed {successful} out of {len(results)} file pairs")
+    print("3.2完成")
 
 
 if __name__ == "__main__":
