@@ -1,19 +1,19 @@
 #!/bin/bash
 # MS2Int-FLR: PTM site localization quality control pipeline
-# Usage: bash run_pipeline.sh PROJECT_ROOT
-# Example: bash MS2Int_FLR/run_pipeline.sh data/MS2Int_flr
+# Usage: bash run_pipeline.sh PROJECT_ROOT CKPT_PATH
+# Example: bash MS2Int_FLR/run_pipeline.sh data/MS2Int_flr checkpoints/ms2int_cevat/model_epoch_97_val_loss_0.2735_0609_221427.pth
 set -e
 export HDF5_USE_FILE_LOCKING=FALSE
 
-if [ $# -lt 1 ]; then
-  echo "Usage: $0 PROJECT_ROOT"; exit 1
+if [ $# -lt 2 ]; then
+  echo "Usage: $0 PROJECT_ROOT CKPT_PATH"; exit 1
 fi
 
 PROJECT_ROOT="$1"
+MODEL_CKPT="$2"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-MODEL_CKPT="${MODEL_CKPT:-${REPO_ROOT}/checkpoints/model_epoch_99_val_loss_0.1618_0129_135924.pth}"
 [ ! -f "$MODEL_CKPT" ] && { echo "[ERROR] Checkpoint not found: $MODEL_CKPT"; exit 1; }
 BATCH_SIZE=1024
 TARGET_FLR=0.01
