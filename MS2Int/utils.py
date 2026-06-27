@@ -67,7 +67,7 @@ def masked_cosine_similarity(y_true, y_pred):
 
 
 class MetaEmbeddingModel(nn.Module):
-    def __init__(self, charge_dim=16, energy_dim=16, instrument_dim=4, final_dim=128):
+    def __init__(self, charge_dim=6, energy_dim=51, instrument_dim=4, final_dim=128):
         super().__init__()
         self.instrument_embedding = nn.Embedding(
             len(SUPPORTED_FRAGMENTATIONS), instrument_dim

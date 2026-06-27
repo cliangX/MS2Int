@@ -71,10 +71,22 @@ def _csv_to_h5(csv_path: str, h5_path: str) -> None:
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
         raise ValueError(f"Input CSV/TSV missing required columns: {missing}")
+
+    if "annotate" in df.columns:
+        annotate_col = df["annotate"].astype(str)
+    elif "Modified_sequence" in df.columns:
+        annotate_col = df["Modified_sequence"].astype(str)
+    else:
+        annotate_col = df["Sequence"].astype(str)
+
     with h5py.File(h5_path, "w") as f:
         f.create_dataset(
             "Sequence",
             data=df["Sequence"].astype(str).str.encode("utf-8").values.astype("S128"),
+        )
+        f.create_dataset(
+            "annotate",
+            data=annotate_col.str.encode("utf-8").values.astype("S256"),
         )
         f.create_dataset("Length", data=df["Length"].values.astype(np.int32))
         f.create_dataset("Charge", data=df["Charge"].values.astype(np.int32))

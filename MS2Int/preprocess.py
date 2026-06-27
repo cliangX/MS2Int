@@ -67,12 +67,14 @@ def data_read(h5_or_path, idx, include_train: bool = True):
         f = h5_or_path
 
     try:
-        if "annotate" not in f:
-            raise KeyError('H5 缺少 "annotate" 列，当前实现仅支持使用 annotate')
         if "annotate_full" in f:
             primary_seq = _decode_bytes(f["annotate_full"][idx : idx + 1])
-        else:
+        elif "annotate" in f:
             primary_seq = _decode_bytes(f["annotate"][idx : idx + 1])
+        elif "Sequence" in f:
+            primary_seq = _decode_bytes(f["Sequence"][idx : idx + 1])
+        else:
+            raise KeyError('H5 缺少 "annotate" 或 "Sequence" 列')
         Length = f["Length"][idx : idx + 1]
         Charge = f["Charge"][idx : idx + 1]
         collision_energy = f["collision_energy"][idx : idx + 1]

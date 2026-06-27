@@ -34,6 +34,7 @@ try:
         count_parameters,
         create_batch_loss_masks,
         load_checkpoint,
+        load_resume_checkpoint,
         masked_spectral_distance,
     )
     from .datasets import CustomDataset
@@ -44,6 +45,7 @@ except ImportError:  # pragma: no cover
         count_parameters,
         create_batch_loss_masks,
         load_checkpoint,
+        load_resume_checkpoint,
         masked_spectral_distance,
     )
     from datasets import CustomDataset
@@ -74,8 +76,14 @@ def get_hparams():
     p.add_argument(
         "--pth",
         type=str,
-        required=True,
-        help="预训练 ckpt 路径（必填）",
+        default="",
+        help="预训练 ckpt 路径；与 --resume 二选一",
+    )
+    p.add_argument(
+        "--resume",
+        type=str,
+        default="",
+        help="微调 checkpoint 路径，恢复 model+optimizer，从 last_epoch+1 继续",
     )
     p.add_argument(
         "--train_data_path",
@@ -144,7 +152,12 @@ def get_hparams():
     # DDP
     p.add_argument("--server", type=str, default="localhost")
     p.add_argument("--port", type=str, default="29500")
-    return p.parse_args()
+    args = p.parse_args()
+    if not args.resume and not args.pth:
+        p.error("必须指定 --pth（预训练）或 --resume（微调续训）之一")
+    if args.resume and args.pth:
+        p.error("--pth 与 --resume 不能同时指定")
+    return args
 
 
 config = get_hparams()
@@ -259,7 +272,12 @@ def train(rank, world_size, mamba_cfg):
     device = torch.device(f"cuda:{rank}")
 
     model = MambaLMHeadModel(mamba_cfg)
-    epoch_loaded, val_loss_loaded = load_checkpoint(config.pth, model)
+    if config.resume:
+        epoch_loaded, val_loss_loaded = load_checkpoint(config.resume, model)
+        ckpt_label = config.resume
+    else:
+        epoch_loaded, val_loss_loaded = load_checkpoint(config.pth, model)
+        ckpt_label = config.pth
     n_total, n_train, train_idx = _set_finetune_freeze(
         model, last_k=config.freeze_last_k
     )
@@ -267,9 +285,11 @@ def train(rank, world_size, mamba_cfg):
     if rank == 0:
         logging.info("=" * 60)
         logging.info(
-            f"启动 fine-tune (no VAT)  ckpt={config.pth}  "
+            f"启动 fine-tune (no VAT)  ckpt={ckpt_label}  "
             f"loaded epoch={epoch_loaded}  val_loss={val_loss_loaded:.4f}"
         )
+        if config.resume:
+            logging.info(f"续训模式: 将从 epoch {epoch_loaded + 1} 训练到 {config.max_epochs - 1}")
         logging.info(
             f"参数总量={n_total/1e6:.2f}M  可训={n_train/1e6:.2f}M  "
             f"占比={n_train/max(n_total,1)*100:.1f}%"
@@ -346,8 +366,16 @@ def train(rank, world_size, mamba_cfg):
         optimizer, warmup=config.warmup_iters, max_iters=config.max_iters
     )
 
+    start_epoch = 0
     best_val = 1e9
-    for epoch in range(config.max_epochs):
+    if config.resume:
+        last_epoch, best_val = load_resume_checkpoint(
+            config.resume, model.module, optimizer, optimizer_device=device
+        )
+        start_epoch = last_epoch + 1
+        scheduler.last_epoch = start_epoch * len(train_loader) - 1
+
+    for epoch in range(start_epoch, config.max_epochs):
         train_sampler.set_epoch(epoch)
         model.train()
         epoch_loss = 0.0
