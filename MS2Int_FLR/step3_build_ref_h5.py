@@ -3,7 +3,7 @@
 """Build candidate-level reference spectrum H5 from DeepFLR target_decoy CSV.
 
 Input: step1_target_decoy.csv + msms.txt + mzML directory
-Output: H5 with per-candidate train_data (N, 29, 31) aligned with Mamba predictions.
+Output: H5 with per-candidate train_data (N, 39, 41) aligned with Mamba predictions.
 
 Reuses phosphorylation.step2/step3 fragment generation and intensity matching.
 """
@@ -36,7 +36,13 @@ from step2_process_df_h5 import (  # type: ignore
     cached_process_single,
     fast_intensity_matching,
 )
-from step3_generate_train_data import ION_ROWS, ION_COLS, ION_TO_IDX, ANNOTATION_MATRIX  # type: ignore
+from step3_generate_train_data import (  # type: ignore
+    H5_SPECTRUM_SHAPE,
+    ION_ROWS,
+    ION_COLS,
+    ION_TO_IDX,
+    ANNOTATION_MATRIX,
+)
 
 SPECTRUM_UTILS_AVAILABLE = False
 proforma = None  # type: ignore
@@ -77,7 +83,7 @@ def compute_theoretical_mz_grid(annotate: str, charge: int) -> np.ndarray:
     
     seq = proforma.parse(annotate)
     if not seq:
-        return np.full((29, 31), np.nan, dtype=np.float32)
+        return np.full(H5_SPECTRUM_SHAPE, np.nan, dtype=np.float32)
     seq = seq[0]
 
     theoretical_fragments = fragment_annotation.get_theoretical_fragments(
@@ -92,9 +98,9 @@ def compute_theoretical_mz_grid(annotate: str, charge: int) -> np.ndarray:
         if mz_value is not None:
             ion_mz_map[str(ion_name)] = float(mz_value)
     
-    mz_grid = np.full((29, 31), np.nan, dtype=np.float32)
-    for row in range(29):
-        for col in range(31):
+    mz_grid = np.full(H5_SPECTRUM_SHAPE, np.nan, dtype=np.float32)
+    for row in range(ION_COLS):
+        for col in range(ION_ROWS):
             ion_name = ANNOTATION_MATRIX[col, row]
             if ion_name and ion_name in ion_mz_map:
                 mz_grid[row, col] = ion_mz_map[ion_name]
@@ -106,7 +112,7 @@ def generate_by_priority_mask(mz_grid: np.ndarray) -> np.ndarray:
     if ANNOTATION_MATRIX is None:
         raise ImportError("ANNOTATION_MATRIX not available")
 
-    L, V = mz_grid.shape  # (29, 31)
+    L, V = mz_grid.shape
     mask = np.ones((L, V), dtype=np.uint8)
 
     by_mz_set: set = set()
@@ -144,7 +150,7 @@ def generate_by_priority_mask(mz_grid: np.ndarray) -> np.ndarray:
 
 def compute_by_priority_mask_for_sequence(annotate: str, charge: int) -> np.ndarray:
     if not SPECTRUM_UTILS_AVAILABLE:
-        return np.ones((29, 31), dtype=np.uint8)
+        return np.ones(H5_SPECTRUM_SHAPE, dtype=np.uint8)
     
     mz_grid = compute_theoretical_mz_grid(annotate, charge)
     return generate_by_priority_mask(mz_grid)
@@ -326,7 +332,7 @@ def _process_one_raw_worker(args: Tuple[str, List[int], str, Dict[Tuple[str, int
         
         if pd.isna(scan) or not key_seq:
             train_mat = np.zeros((ION_ROWS, ION_COLS), dtype=float)
-            by_mask = np.ones((29, 31), dtype=np.uint8)
+            by_mask = np.ones(H5_SPECTRUM_SHAPE, dtype=np.uint8)
             results[idx] = (train_mat, by_mask, float("nan"), "", "", float("nan"))
             continue
         
@@ -435,10 +441,10 @@ def build_ref_h5(
         if train_mats[i] is None:
             train_mats[i] = np.zeros((ION_ROWS, ION_COLS), dtype=float)
         if by_priority_masks[i] is None:
-            by_priority_masks[i] = np.ones((29, 31), dtype=np.uint8)
+            by_priority_masks[i] = np.ones(H5_SPECTRUM_SHAPE, dtype=np.uint8)
 
     train_array = np.stack(train_mats, axis=0)
-    train_array = np.swapaxes(train_array, 1, 2)  # (N, 31, 29) -> (N, 29, 31)
+    train_array = np.swapaxes(train_array, 1, 2)  # (N, ION_ROWS, ION_COLS) -> (N, 39, 41)
 
     by_priority_mask_array = np.stack(by_priority_masks, axis=0)
 
@@ -484,10 +490,10 @@ def build_ref_h5(
         dset.attrs["description"] = "Collision energy"
 
         dset = f.create_dataset("train_data", data=train_array)
-        dset.attrs["description"] = "Intensity matrix (N, 29, 31)"
+        dset.attrs["description"] = "Intensity matrix (N, 39, 41)"
 
         dset = f.create_dataset("by_priority_mask", data=by_priority_mask_array)
-        dset.attrs["description"] = "b/y priority mask (N, 29, 31)"
+        dset.attrs["description"] = "b/y priority mask (N, 39, 41)"
 
         f.attrs["description"] = "Candidate-level reference spectrum H5"
         f.attrs["source_target_decoy"] = os.path.abspath(target_decoy_csv)

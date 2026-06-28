@@ -1,20 +1,34 @@
 #!/bin/bash
 # MS2Int-FLR: PTM site localization quality control pipeline
 # Usage: bash run_pipeline.sh PROJECT_ROOT CKPT_PATH
-# Example: bash MS2Int_FLR/run_pipeline.sh data/MS2Int_flr checkpoints/ms2int_cevat/model_epoch_97_val_loss_0.2735_0609_221427.pth
+# Example: bash MS2Int_FLR/run_pipeline.sh data/MS2Int_flr ptm_finetune/checkpoints/model_epoch_14_val_loss_0.3056_0627_123641.pth
 set -e
 export HDF5_USE_FILE_LOCKING=FALSE
+PY_BIN="${PY_BIN:-python}"
 
 if [ $# -lt 2 ]; then
   echo "Usage: $0 PROJECT_ROOT CKPT_PATH"; exit 1
 fi
 
-PROJECT_ROOT="$1"
-MODEL_CKPT="$2"
+CALL_DIR="$(pwd -P)"
+PROJECT_ROOT_ARG="$1"
+MODEL_CKPT_ARG="$2"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+case "$PROJECT_ROOT_ARG" in
+  /*) PROJECT_ROOT="$PROJECT_ROOT_ARG" ;;
+  *) PROJECT_ROOT="${CALL_DIR}/${PROJECT_ROOT_ARG}" ;;
+esac
+case "$MODEL_CKPT_ARG" in
+  /*) MODEL_CKPT="$MODEL_CKPT_ARG" ;;
+  *) MODEL_CKPT="${CALL_DIR}/${MODEL_CKPT_ARG}" ;;
+esac
+
+[ ! -d "$PROJECT_ROOT" ] && { echo "[ERROR] Project root not found: $PROJECT_ROOT"; exit 1; }
+PROJECT_ROOT="$(cd "$PROJECT_ROOT" && pwd)"
 [ ! -f "$MODEL_CKPT" ] && { echo "[ERROR] Checkpoint not found: $MODEL_CKPT"; exit 1; }
+MODEL_CKPT="$(cd "$(dirname "$MODEL_CKPT")" && pwd)/$(basename "$MODEL_CKPT")"
 BATCH_SIZE=1024
 TARGET_FLR=0.01
 
@@ -36,7 +50,7 @@ echo "PROJECT_ROOT=$(basename "$PROJECT_ROOT")  MODEL=$(basename "$MODEL_CKPT") 
 # Step 1: Generate target/decoy list
 echo "[Step 1/8] Generate TD list"
 if step_done "step1.done"; then echo "  skip"; else
-  python "${SCRIPT_DIR}/step1_generate_TD_list.py" \
+  ${PY_BIN} "${SCRIPT_DIR}/step1_generate_TD_list.py" \
     --inputfile "txt/msms.txt" \
     --outputfile "${OUT_DIR}/step1_TD_list.csv" --quiet
   mark_done "step1.done" "TD list"
@@ -45,7 +59,7 @@ fi
 # Step 2: Create TD DataFrame
 echo "[Step 2/8] Create TD DataFrame"
 if step_done "step2.done"; then echo "  skip"; else
-  python "${SCRIPT_DIR}/step2_create_TD_df.py" \
+  ${PY_BIN} "${SCRIPT_DIR}/step2_create_TD_df.py" \
     --inputfile "${OUT_DIR}/step1_TD_list.csv" \
     --outputfile "${OUT_DIR}/step2_TD_df.csv" --quiet
   mark_done "step2.done" "TD DataFrame"
@@ -55,8 +69,8 @@ fi
 echo "[Step 3/8] Build reference H5"
 if step_done "step3.done"; then echo "  skip"; else
   [ -f "${RESCORE_DIR}/step3_ref_spectra.h5" ] && rm -f "${RESCORE_DIR}/step3_ref_spectra.h5"
-  python -c 'import pyopenms' 2>/dev/null || { echo "[ERROR] pyopenms not installed"; exit 1; }
-  python "${SCRIPT_DIR}/step3_build_ref_h5.py" \
+  ${PY_BIN} -c 'import pyopenms' 2>/dev/null || { echo "[ERROR] pyopenms not installed"; exit 1; }
+  ${PY_BIN} "${SCRIPT_DIR}/step3_build_ref_h5.py" \
     --target_decoy_csv "${OUT_DIR}/step1_TD_list.csv" \
     --msms "txt/msms.txt" --mzml-dir "mzml" \
     --output "${RESCORE_DIR}/step3_ref_spectra.h5" --quiet
@@ -66,7 +80,7 @@ fi
 # Step 4: Convert to Mamba input H5
 echo "[Step 4/8] Convert to Mamba H5"
 if step_done "step4.done"; then echo "  skip"; else
-  python "${SCRIPT_DIR}/step4_convert_to_mamba_h5.py" \
+  ${PY_BIN} "${SCRIPT_DIR}/step4_convert_to_mamba_h5.py" \
     --input "${OUT_DIR}/step2_TD_df.csv" \
     --output "${OUT_DIR}/step4_mamba_input.h5" \
     --collision_energy 35 --fragmentation CID \
@@ -81,7 +95,7 @@ if step_done "step5.done"; then echo "  skip"; else
   [ ! -f "$MAMBA_H5" ] && { echo "[ERROR] Not found: $MAMBA_H5"; exit 1; }
 
   # Override Fragmentation=HCD, collision_energy=30 for prediction
-  python - "$MAMBA_H5" <<'PY'
+  ${PY_BIN} - "$MAMBA_H5" <<'PY'
 import h5py, numpy as np, sys
 with h5py.File(sys.argv[1], "r+") as f:
     n = f["Fragmentation"].shape[0]
@@ -97,11 +111,11 @@ fi
 # Step 6: Compute cosine similarity
 echo "[Step 6/8] Compute cosine similarity"
 if step_done "step6.done"; then echo "  skip"; else
-  python "${SCRIPT_DIR}/step6_compute_Cosine.py" \
+  ${PY_BIN} "${SCRIPT_DIR}/step6_compute_Cosine.py" \
     --pred_h5 "${OUT_DIR}/step4_mamba_input.h5" \
     --ref_h5 "${RESCORE_DIR}/step3_ref_spectra.h5" \
     --pred_key Intpredict --true_key train_data \
-    --n 31 --mode flatten --align index \
+    --n 41 --mode flatten --align index \
     --template_csv "${OUT_DIR}/step2_TD_df.csv"
   cp "${OUT_DIR}/step2_TD_df.csv" "${OUT_DIR}/step6_df_score.csv"
   mark_done "step6.done" "Cosine similarity"
@@ -110,7 +124,7 @@ fi
 # Step 7: Compute FLR curve
 echo "[Step 7/8] Compute FLR curve"
 if step_done "step7.done"; then echo "  skip"; else
-  python "${SCRIPT_DIR}/step7_compute_flr.py" \
+  ${PY_BIN} "${SCRIPT_DIR}/step7_compute_flr.py" \
     --modelresultfile "${OUT_DIR}/step6_df_score.csv" \
     --sequencefile "${OUT_DIR}/step1_TD_list.csv" \
     --outputfile "${OUT_DIR}/step7_flr_curve.csv" \
@@ -141,7 +155,7 @@ else
     [ -z "$DELTA_CUTOFF" ] && DELTA_CUTOFF=$(awk -F, 'NR==2 {print $1}' "$FLR_CSV")
     echo "  Delta cutoff (FLR<=$TARGET_FLR): $DELTA_CUTOFF"
 
-    python "${SCRIPT_DIR}/step8_export_phosphosites.py" \
+    ${PY_BIN} "${SCRIPT_DIR}/step8_export_phosphosites.py" \
       --modelresultfile "${OUT_DIR}/step6_df_score.csv" \
       --sequencefile "${OUT_DIR}/step1_TD_list.csv" \
       --inputfile1 "txt/msms.txt" \

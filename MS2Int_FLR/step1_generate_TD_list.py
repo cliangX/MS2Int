@@ -5,6 +5,23 @@ import pandas as pd
 import random
 import argparse
 
+MAX_PEPTIDE_LENGTH = 40
+
+
+def validate_max_length(df: pd.DataFrame, sequence_col: str, context: str) -> None:
+    lengths = df[sequence_col].astype(str).str.strip().str.len()
+    too_long = lengths > MAX_PEPTIDE_LENGTH
+    if not too_long.any():
+        return
+
+    examples = df.loc[too_long, ["SourceFile", "Spectrum", "PP.Charge", sequence_col]].head(5)
+    example_text = examples.to_string(index=False)
+    raise ValueError(
+        f"{context} contains {int(too_long.sum())} peptides longer than "
+        f"{MAX_PEPTIDE_LENGTH} aa; max length={int(lengths.max())}.\n"
+        f"Examples:\n{example_text}"
+    )
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -130,6 +147,7 @@ def main():
                         sequence[c],sequence[sty] = sequence[sty],sequence[c]
 
     print(f"Generated target/decoy sequences: {len(result)}")
+    validate_max_length(result, "exp_strip_sequence", "FLR target/decoy list")
     result.to_csv(args.outputfile, index=None)
 
 

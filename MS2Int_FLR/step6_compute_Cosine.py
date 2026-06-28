@@ -31,26 +31,35 @@ def _to_text(value) -> str:
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, os.pardir))
-EXTRACT_ROOT = os.path.join(REPO_ROOT, "spectrum_processing", "extract_real_spectrums")
+EXTRACT_ROOT = os.path.join(SCRIPT_DIR, "phosphorylation")
 if EXTRACT_ROOT not in sys.path:
     sys.path.insert(0, EXTRACT_ROOT)
 
 ANNOTATION_MATRIX = None  # type: ignore
-if importlib.util.find_spec("step3_generate_train_data") is not None or os.path.isfile(os.path.join(EXTRACT_ROOT, "step3_generate_train_data.py")):
-    from step3_generate_train_data import ANNOTATION_MATRIX  # type: ignore
+ION_ROWS = None  # type: ignore
+ION_COLS = None  # type: ignore
+H5_SPECTRUM_SHAPE = None  # type: ignore
+if importlib.util.find_spec("step3_generate_train_data") is not None or os.path.isfile(
+    os.path.join(EXTRACT_ROOT, "step3_generate_train_data.py")
+):
+    from step3_generate_train_data import (  # type: ignore
+        ANNOTATION_MATRIX,
+        H5_SPECTRUM_SHAPE,
+        ION_COLS,
+        ION_ROWS,
+    )
 
 
 def compute_theoretical_mz_grid(annotate: str, charge: int) -> np.ndarray:
-    """Compute theoretical m/z grid (29, 31) for a peptide sequence."""
+    """Compute theoretical m/z grid (39, 41) for a peptide sequence."""
     if proforma is None or fragment_annotation is None:
         raise ImportError("spectrum_utils required")
-    if ANNOTATION_MATRIX is None:
+    if ANNOTATION_MATRIX is None or H5_SPECTRUM_SHAPE is None:
         raise ImportError("ANNOTATION_MATRIX not available")
 
     seq = proforma.parse(annotate)
     if not seq:
-        return np.full((29, 31), np.nan, dtype=np.float32)
+        return np.full(H5_SPECTRUM_SHAPE, np.nan, dtype=np.float32)
     seq = seq[0]
 
     theoretical_fragments = fragment_annotation.get_theoretical_fragments(
@@ -63,9 +72,9 @@ def compute_theoretical_mz_grid(annotate: str, charge: int) -> np.ndarray:
         if mz_value is not None:
             ion_mz_map[str(fragment)] = float(mz_value)
 
-    mz_grid = np.full((29, 31), np.nan, dtype=np.float32)
-    for row in range(29):
-        for col in range(31):
+    mz_grid = np.full(H5_SPECTRUM_SHAPE, np.nan, dtype=np.float32)
+    for row in range(ION_COLS):
+        for col in range(ION_ROWS):
             ion_name = ANNOTATION_MATRIX[col, row]
             if ion_name and ion_name in ion_mz_map:
                 mz_grid[row, col] = ion_mz_map[ion_name]

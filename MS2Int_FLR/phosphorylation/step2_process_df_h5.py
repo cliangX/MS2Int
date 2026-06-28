@@ -1,0 +1,564 @@
+import gc
+import multiprocessing as mp
+import multiprocessing.dummy as mp_thread
+import os
+import warnings
+from functools import lru_cache
+import re
+
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+
+import numpy as np
+import pandas as pd
+
+try:
+    import pyopenms as oms  # type: ignore
+except Exception:
+    oms = None  # type: ignore
+
+try:
+    from spectrum_utils import fragment_annotation, proforma  # type: ignore
+except Exception:
+    fragment_annotation = None  # type: ignore
+    proforma = None  # type: ignore
+from tqdm import tqdm
+
+warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
+warnings.filterwarnings("ignore", category=pd.errors.DtypeWarning)
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
+
+mod_transform = {
+    r"(Oxidation (M))": "[Oxidation]",
+    r"(Acetyl (Protein N-term))": "[Acetyl]-",
+    r"(ac)": "[Acetyl]-",
+    r"(ox)": "[Oxidation]",
+    r"(Deamidation (NQ))": "[Deamidated]",
+    "C": "C[Carbamidomethyl]",
+    r"(de)": "[Deamidated]",
+    "_": "",
+    r"(Phospho (STY))": "[Phospho]",
+    r"(Phospho(Y))": "[Phospho]",
+    r"(Phospho (Y))": "[Phospho]",
+}
+
+
+def apply_modifications(sequence: str) -> str:
+    if not isinstance(sequence, str):
+        sequence = str(sequence)
+    for key, value in mod_transform.items():
+        sequence = sequence.replace(key, value)
+    return sequence
+
+
+def generate_theoretical_fragments(annotate: str):
+    if proforma is None or fragment_annotation is None:
+        raise ImportError("Missing spectrum_utils dependency for theoretical fragment generation.")
+    try:
+        seq = proforma.parse(annotate)
+    except Exception as e:
+        print(f"Warning: ProForma parse failed: {annotate} -> {e}")
+        return []
+
+    if not seq:
+        return []
+
+    try:
+        theoretical_fragments = fragment_annotation.get_theoretical_fragments(
+            seq[0],
+            ion_types="byIm",
+            max_charge=2,
+            neutral_losses={
+                "H3PO4": -97.976896,
+            },
+        )
+    except Exception as e:
+        print(f"Warning: theoretical fragment generation failed: {annotate} -> {e}")
+        return []
+
+    seq_len = len(seq[0].sequence)
+    phospho_sites = set()
+
+    for mod in getattr(seq[0], "modifications", []) or []:
+        pos = getattr(mod, "position", None)
+        if not isinstance(pos, int):
+            continue
+        labels = [
+            getattr(mod, "name", None),
+            getattr(mod, "cv_entry", None),
+            getattr(mod, "cv_label", None),
+            str(mod),
+        ]
+        label_text = " ".join(str(x) for x in labels if x).lower()
+        if "phospho" in label_text:
+            phospho_sites.add(pos + 1)
+
+    if not phospho_sites:
+        depth = 0
+        pos = 0
+        last_residue = None
+        i = 0
+        while i < len(annotate):
+            ch = annotate[i]
+            if ch == "[":
+                depth += 1
+                if depth == 1 and last_residue is not None:
+                    if annotate.startswith("[Phospho]", i):
+                        phospho_sites.add(last_residue)
+                i += 1
+                continue
+            if ch == "]":
+                depth = max(0, depth - 1)
+                i += 1
+                continue
+            if depth == 0 and ch.isalpha() and ch.isupper():
+                pos += 1
+                last_residue = pos
+            i += 1
+
+    def covers_phospho(base_name: str) -> bool:
+        if not phospho_sites:
+            return False
+
+        base_no_charge = re.sub(r"\^\d+$", "", base_name)
+
+        m_match = re.match(r"^m(\d+):(\d+)", base_no_charge)
+        if m_match:
+            start = int(m_match.group(1))
+            end = int(m_match.group(2))
+            covered = set(range(start, end))
+            return bool(phospho_sites & covered)
+
+        if base_name.startswith("I"):
+            return False
+
+        match = re.match(r"^([abcxyz])(\d+)", base_no_charge)
+        if not match:
+            return False
+
+        ion_type, idx_str = match.groups()
+        idx = int(idx_str)
+        if ion_type in "abc":
+            covered = set(range(1, idx + 1))
+        else:  # x/y/z
+            start = max(1, seq_len - idx + 1)
+            covered = set(range(start, seq_len + 1))
+
+        return bool(phospho_sites & covered)
+
+    result = []
+    for fragment, value in theoretical_fragments:
+        name = str(fragment)
+
+        if "-H3PO4" in name:
+            check_name = name.replace("-H3PO4", "")
+            if not covers_phospho(check_name):
+                continue
+
+        result.append((name, value))
+
+    return result
+
+
+@lru_cache(maxsize=15)
+def cached_process_single(annotate):
+    frags = generate_theoretical_fragments(annotate)
+    return tuple(frags)
+
+
+def process_batch(annotate_batch):
+    results = []
+    for annotate in annotate_batch:
+        result = cached_process_single(annotate)
+        results.append(list(result))
+    return results
+
+
+def parallel_process_with_cache(
+    annotates, num_processes=4, batch_size=1000, prefer_threads=None, verbose=False
+):
+    batches = []
+    for i in range(0, len(annotates), batch_size):
+        batch = annotates[i : i + batch_size]
+        batches.append(batch)
+
+    if verbose:
+        print(f"Processing {len(annotates)} sequences in {len(batches)} batches")
+
+    batch_results = []
+    use_threads = (
+        prefer_threads if prefer_threads is not None else mp.current_process().daemon
+    )
+    _pool_mod = mp_thread if use_threads else mp
+    with _pool_mod.Pool(processes=num_processes) as pool:
+        iterator = pool.imap(process_batch, batches)
+        if verbose:
+            iterator = tqdm(iterator, total=len(batches), desc="theoretical fragments")
+        for res in iterator:
+            batch_results.append(res)
+
+    final_results = []
+    for batch_result in batch_results:
+        final_results.extend(batch_result)
+
+    return final_results
+
+
+try:
+    from numba import njit  # type: ignore
+
+    _NUMBA = True
+except Exception:
+    _NUMBA = False
+
+
+def _match_fragments_python(
+    theory_mz: np.ndarray,
+    mz_sorted: np.ndarray,
+    inten_sorted: np.ndarray,
+    tol_value: float,
+    is_ppm: bool,
+) -> np.ndarray:
+    out = np.zeros(theory_mz.shape[0], dtype=np.float64)
+    for idx in range(theory_mz.shape[0]):
+        tmz = theory_mz[idx]
+        if np.isnan(tmz):
+            out[idx] = 0.0
+            continue
+        tol = tmz * tol_value * 1e-6 if is_ppm else tol_value
+        left = np.searchsorted(mz_sorted, tmz - tol, side="left")
+        right = np.searchsorted(mz_sorted, tmz + tol, side="right")
+        if right > left:
+            max_val = inten_sorted[left]
+            for j in range(left + 1, right):
+                if inten_sorted[j] > max_val:
+                    max_val = inten_sorted[j]
+            out[idx] = float(max_val)
+        else:
+            out[idx] = 0.0
+    return out
+
+
+if _NUMBA:
+
+    @njit(cache=True, fastmath=True)
+    def _match_fragments_numba(theory_mz, mz_sorted, inten_sorted, tol_value, is_ppm):
+        out = np.zeros(theory_mz.shape[0], dtype=np.float64)
+        for idx in range(theory_mz.shape[0]):
+            tmz = theory_mz[idx]
+            if np.isnan(tmz):
+                out[idx] = 0.0
+                continue
+            tol = tmz * tol_value * 1e-6 if is_ppm else tol_value
+            left = np.searchsorted(mz_sorted, tmz - tol, side="left")
+            right = np.searchsorted(mz_sorted, tmz + tol, side="right")
+            if right > left:
+                max_val = inten_sorted[left]
+                for j in range(left + 1, right):
+                    if inten_sorted[j] > max_val:
+                        max_val = inten_sorted[j]
+                out[idx] = max_val
+            else:
+                out[idx] = 0.0
+        return out
+else:
+    _match_fragments_numba = _match_fragments_python  # noqa: E305
+
+
+def fast_intensity_matching(
+    theory_mz_list, experiment_mz_list, experiment_int_list, mass_analyzer
+):
+    if theory_mz_list is None:
+        return None
+    if mass_analyzer not in ("FTMS", "ITMS"):
+        return None
+
+    if experiment_mz_list is None or experiment_int_list is None:
+        return [[val[0], 0.0] for val in theory_mz_list]
+
+    mz = np.asarray(experiment_mz_list, dtype=float)
+    inten = np.asarray(experiment_int_list, dtype=float)
+    if mz.size == 0:
+        return [[val[0], 0.0] for val in theory_mz_list]
+
+    if mz.ndim != 1:
+        mz = mz.ravel()
+    if inten.ndim != 1:
+        inten = inten.ravel()
+    order = np.argsort(mz)
+    mz_sorted = mz[order]
+    inten_sorted = inten[order]
+
+    names = []
+    mz_vals = []
+    by_mz_vals = []
+    m_indices = []
+
+    for idx, (frag_str, tmz) in enumerate(theory_mz_list):
+        names.append(frag_str)
+        mz_val = np.nan if tmz is None else float(tmz)
+        mz_vals.append(mz_val)
+
+        if tmz is None or frag_str is None:
+            continue
+
+        if (
+            isinstance(frag_str, str)
+            and len(frag_str) >= 2
+            and frag_str[0] in ("b", "y")
+            and frag_str[1].isdigit()
+        ):
+            if not np.isnan(mz_val):
+                by_mz_vals.append(mz_val)
+        elif isinstance(frag_str, str) and frag_str.startswith("m"):
+            m_indices.append(idx)
+    theory_mz = np.asarray(mz_vals, dtype=np.float64)
+
+    is_ppm = mass_analyzer == "FTMS"
+    tol_value = 20.0 if is_ppm else 0.5
+
+    if by_mz_vals and m_indices:
+        by_mz_sorted = np.sort(np.asarray(by_mz_vals, dtype=np.float64))
+        for mi in m_indices:
+            tmz = theory_mz[mi]
+            if np.isnan(tmz):
+                continue
+            tol = tmz * tol_value * 1e-6 if is_ppm else tol_value
+            left = np.searchsorted(by_mz_sorted, tmz - tol, side="left")
+            right = np.searchsorted(by_mz_sorted, tmz + tol, side="right")
+            if right > left:
+                theory_mz[mi] = np.nan
+
+    intensities = _match_fragments_numba(
+        theory_mz, mz_sorted, inten_sorted, tol_value, is_ppm
+    )
+
+    out = []
+    for i, name in enumerate(names):
+        out.append([name, float(intensities[i])])
+    return out
+
+
+def process_single_spectrum(args):
+    theory_mz_list, experiment_mz_list, experiment_int_list, mass_analyzer = args
+    return fast_intensity_matching(
+        theory_mz_list, experiment_mz_list, experiment_int_list, mass_analyzer
+    )
+
+
+def parallel_intensity_matching(
+    combined_df, num_processes=4, batch_size=1000, prefer_threads=None, verbose=False
+):
+    args_list = list(
+        zip(
+            combined_df["theoretical_fragments"],
+            combined_df["mzarray"],
+            combined_df["intarray"],
+            combined_df["Mass analyzer"],
+        )
+    )
+
+    use_threads = (
+        prefer_threads if prefer_threads is not None else mp.current_process().daemon
+    )
+    _pool_mod = mp_thread if use_threads else mp
+
+    chunksize = max(1, int(batch_size))
+
+    with _pool_mod.Pool(processes=num_processes) as pool:
+        iterator = pool.imap(process_single_spectrum, args_list, chunksize=chunksize)
+        if verbose:
+            iterator = tqdm(iterator, total=len(args_list), desc="intensity matching")
+        results = list(iterator)
+
+    return results
+
+
+def process_pair(meta_path, mz_path, msms_root, df_h5_dir, inner_num_procs=4):
+    try:
+        if oms is None:
+            raise ImportError("Missing pyopenms dependency for mzML reading.")
+        file_name = os.path.basename(meta_path)
+        MSMS = os.path.join(msms_root, file_name)
+
+        df1 = pd.read_csv(MSMS, sep="\t", low_memory=False)
+
+        columns_to_keep = [
+            "Sequence",
+            "Length",
+            "Modifications",
+            "Modified sequence",
+            "Charge",
+            "Scan number",
+            "Score",
+            "Raw file",
+            "Reverse",
+        ]
+        new_column_names = [
+            "Sequence",
+            "Length",
+            "Modifications",
+            "Modified_sequence",
+            "Charge",
+            "MS2_Scan_Number",
+            "Score",
+            "Raw_file",
+            "Reverse",
+        ]
+        meta_df = df1[columns_to_keep].copy()
+        meta_df.columns = new_column_names
+
+        meta_df["annotate"] = meta_df["Modified_sequence"].apply(apply_modifications)
+
+        df1["Scan number"] = df1["Scan number"].astype(int)
+        meta_df["MS2_Scan_Number"] = meta_df["MS2_Scan_Number"].astype(int)
+
+        meta_df = meta_df.merge(
+            df1[["Scan number", "Mass analyzer", "Fragmentation"]],
+            left_on="MS2_Scan_Number",
+            right_on="Scan number",
+            how="left",
+        )
+
+        meta_df.drop(columns=["Scan number"], inplace=True)
+
+        meta_df["theoretical_fragments"] = parallel_process_with_cache(
+            meta_df["annotate"].values.tolist(),
+            num_processes=inner_num_procs,
+            batch_size=500,
+            prefer_threads=True,
+            verbose=False,
+        )
+
+        exp = oms.MSExperiment()
+        oms.MzMLFile().load(mz_path, exp)
+
+        normalizer = oms.Normalizer()
+        param = normalizer.getParameters()
+        param.setValue("method", "to_one")
+        normalizer.setParameters(param)
+        normalizer.filterPeakMap(exp)
+
+        mz_df = exp.get_df()
+        mz_df["instrument"] = exp.getExperimentalSettings().getInstrument().getName()
+
+        mz_df["collision_energy"] = None
+        mz_df["MS2_Scan_Number"] = None
+        mz_df["Fragmentation_mzml"] = None
+        for idx, spectrum in enumerate(exp):
+            if spectrum.getMSLevel() == 2 and spectrum.getPrecursors():
+                precursor = spectrum.getPrecursors()[0]
+                mz_df.at[idx, "MS2_Scan_Number"] = idx + 1
+                if precursor.metaValueExists("collision energy"):
+                    collision_energy = precursor.getMetaValue("collision energy")
+                    mz_df.at[idx, "collision_energy"] = collision_energy
+
+                try:
+                    short = [
+                        x.decode() for x in precursor.getActivationMethodsAsShortString()
+                    ]
+                    frag = short[0] if short else ""
+                except Exception:
+                    frag = ""
+                if frag:
+                    mz_df.at[idx, "Fragmentation_mzml"] = frag
+
+        combined_df = pd.merge(meta_df, mz_df, on="MS2_Scan_Number", how="left")
+        if "Fragmentation_mzml" in combined_df.columns:
+            mzml_frag = combined_df["Fragmentation_mzml"]
+            use_mzml = mzml_frag.notna() & (mzml_frag.astype(str).str.strip() != "")
+            if use_mzml.any():
+                combined_df.loc[use_mzml, "Fragmentation"] = mzml_frag.loc[use_mzml]
+            combined_df.drop(columns=["Fragmentation_mzml"], inplace=True)
+        combined_df["collision_energy"] = (
+            combined_df["collision_energy"].astype(float).fillna(30)
+        )
+        combined_df["theoretical_fragments_int"] = parallel_intensity_matching(
+            combined_df,
+            num_processes=inner_num_procs,
+            batch_size=500,
+            prefer_threads=True,
+            verbose=False,
+        )
+        output_path = os.path.join(df_h5_dir, meta_df["Raw_file"].iloc[0] + ".h5")
+        combined_df.to_hdf(output_path, key="combined_data", mode="w")
+        print(f"Processed and saved: {output_path}")
+        gc.collect()
+        return True
+    except Exception as e:
+        print(f"Error processing {meta_path} and {mz_path}: {str(e)}")
+        return False
+
+
+def run_step2(config):
+    msms_root = config["paths"]["msms_filtered_dir"]
+    mzml_root = config["paths"]["mzml_dir"]
+    search_root = config["paths"]["search_dir"]
+    df_h5_dir = config["paths"]["df_h5_dir"]
+    num_work = config["performance"]["num_workers"]
+
+    os.makedirs(df_h5_dir, exist_ok=True)
+
+    files = os.listdir(search_root)
+    experiment_names = [f.split(".txt")[0] for f in files]
+
+    mzml_map = {}
+    for file in os.listdir(mzml_root):
+        if file.lower().endswith(".mzml"):
+            stem = os.path.splitext(file)[0]
+            mzml_map[stem] = os.path.join(mzml_root, file)
+
+    search_map = {}
+    for file in os.listdir(search_root):
+        if file.endswith(".txt"):
+            stem = os.path.splitext(file)[0]
+            search_map[stem] = os.path.join(search_root, file)
+
+    valid_pairs = []
+    valid_mzml_files = []
+    valid_search_files = []
+
+    for experiment_name in experiment_names:
+        search_path = search_map.get(experiment_name)
+        if search_path is None:
+            print(f"Warning: No Search file found for exact name '{experiment_name}'")
+            continue
+
+        mzml_path = mzml_map.get(experiment_name)
+        if mzml_path is None:
+            print(f"Warning: No mzML file found for exact name '{experiment_name}'")
+            continue
+
+        valid_search_files.append(search_path)
+        valid_mzml_files.append(mzml_path)
+        valid_pairs.append((experiment_name, search_path, mzml_path))
+
+    print(f"Found {len(valid_pairs)} valid file pairs to process")
+
+    def main_process(search_files, mzml_files):
+        inner_num_procs = 32
+
+        results = []
+        for search_file, mzml_file in tqdm(
+            zip(search_files, mzml_files), total=len(search_files), desc="Processing files"
+        ):
+            result = process_pair(
+                search_file, mzml_file, msms_root, df_h5_dir, inner_num_procs
+            )
+            results.append(result)
+            gc.collect()
+
+        successful = sum(1 for r in results if r)
+        print(f"Successfully processed {successful} out of {len(results)} file pairs")
+
+    main_process(valid_search_files, valid_mzml_files)
+
+
+if __name__ == "__main__":
+    import os
+
+    import yaml
+
+    cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+    with open(cfg_path, "r") as f:
+        config = yaml.safe_load(f)
+    run_step2(config)

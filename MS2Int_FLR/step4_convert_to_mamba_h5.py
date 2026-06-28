@@ -8,6 +8,8 @@ import argparse
 import os
 import re
 
+MAX_PEPTIDE_LENGTH = 40
+
 
 def convert_deepflr_to_mamba_sequence(key_x):
     modification_map = {
@@ -40,6 +42,19 @@ def main():
     missing = [c for c in required_columns if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
+
+    peptide_lengths = df['PEP.StrippedSequence'].astype(str).str.strip().str.len()
+    too_long = peptide_lengths > MAX_PEPTIDE_LENGTH
+    if too_long.any():
+        examples = df.loc[
+            too_long,
+            ['SourceFile', 'Fspectrum', 'PP.Charge', 'PEP.StrippedSequence'],
+        ].head(5)
+        raise ValueError(
+            f"FLR Mamba input contains {int(too_long.sum())} peptides longer than "
+            f"{MAX_PEPTIDE_LENGTH} aa; max length={int(peptide_lengths.max())}.\n"
+            f"Examples:\n{examples.to_string(index=False)}"
+        )
 
     n_samples = len(df)
     print(f"Found {n_samples} peptide candidates")
