@@ -9,18 +9,14 @@ try:
     from .utils import *
     from .datasets import CustomDataset
     from .vat import VATLoss
-    from .reference_fallback import enable_reference_fallback
 except ImportError:  # pragma: no cover
     from hparams import get_hparams
     from model import MambaLMHeadModel
     from utils import *
     from datasets import CustomDataset
     from vat import VATLoss
-    from reference_fallback import enable_reference_fallback
 
 config = get_hparams()
-if config.reference_fallback:
-    enable_reference_fallback()
 
 try:
     import setproctitle

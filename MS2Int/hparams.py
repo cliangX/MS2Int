@@ -104,12 +104,6 @@ def get_hparams():
         default=False,
         help="将整个 H5 一次性加载到内存，适合内存充足的机器以加速 IO",
     )
-    parser.add_argument(
-        "--reference_fallback",
-        action="store_true",
-        default=False,
-        help="启用参考实现回退，绕开不支持当前 GPU 的 Mamba2 Triton fused kernel",
-    )
 
     parser.add_argument(
         "--server",
