@@ -184,7 +184,7 @@ python "spectrum_processing/unmodficaiton/run.py" \
 
 ```sh
 python "MS2Int/predict.py" \
-  --ckpt "/mnt/public/lcy/random/B512_L4_vat/model_epoch_99_val_loss_0.1618_0129_135924.pth" \
+  --ckpt "checkpoints/ms2int_cevat/model_epoch_97_val_loss_0.2735_0609_221427.pth" \
   --input "data/MS2Int_input.h5" \
   --output "data/MS2Int_input.h5"
 ```
@@ -212,7 +212,7 @@ C[Carbamidomethyl]DEFGHIK,8,2,25,HCD
 
 ```sh
 python "MS2Int/predict.py" \
-  --ckpt "/mnt/public/lcy/random/B512_L4_vat/model_epoch_99_val_loss_0.1618_0129_135924.pth" \
+  --ckpt "checkpoints/ms2int_cevat/model_epoch_97_val_loss_0.2735_0609_221427.pth" \
   --input "data/demo_input.csv" \
   --output "data/demo_output.h5"
 ```
@@ -241,7 +241,7 @@ python MS2Int/main.py --train_data_path "data/training/train.h5"
 
 ```sh
 python MS2Int/fine_tune.py \
-  --pth "/mnt/public/lcy/random/B512_L4_vat/model_epoch_99_val_loss_0.1618_0129_135924.pth" \
+  --pth "checkpoints/ms2int_cevat/model_epoch_97_val_loss_0.2735_0609_221427.pth" \
   --train_data_path "data/training/train.h5" \
   --checkpoint_path "checkpoints/" \
   --log_path "logs/train.log"
@@ -290,8 +290,11 @@ data/MS2Int_flr/
 **Run the full pipeline:**
 
 ```sh
-bash MS2Int_FLR/run_pipeline.sh data/MS2Int_flr
+bash MS2Int_FLR/run_pipeline.sh data/MS2Int_flr \
+  ptm_finetune/checkpoints/model_epoch_14_val_loss_0.3056_0627_123641.pth
 ```
+
+The second argument is the MS2Int checkpoint path (required). For phosphoproteomics FLR, use a phosphorylation fine-tuned checkpoint; see [Model Weights & Data](#model-weights--data).
 
 **Output files (in `data/MS2Int_flr/output/`):**
 
@@ -307,8 +310,8 @@ Pre-trained model weights are available for download:
 
 | Model | Description | Download |
 |-------|-------------|----------|
-| MS2Int (Unmodified) | Trained on unmodified peptides (HCD/CID) | [Google Drive](https://drive.google.com/file/d/10vPnyP-yGM9LUOm1fnRbZA8tYNcGucFC/view?usp=sharing) |
-| MS2Int (Phosphorylation) | Fine-tuned for phosphopeptides | [Google Drive](https://drive.google.com/file/d/1vkM5HzU1nVdRMnS6asqByrzuEwE0x9ij/view?usp=sharing) |
+| MS2Int (Unmodified) | Trained on unmodified peptides (HCD/CID) | [Google Drive](https://drive.google.com/file/d/19njBiyeZweNvtlEI7Mekjp-kDKKKo458/view?usp=drive_link) |
+| MS2Int (Phosphorylation) | Fine-tuned for phosphopeptides | [Google Drive](https://drive.google.com/file/d/1A58kc1555622lbqsMI-Zg-kT7GoHhkS5/view?usp=drive_link) |
 
 
 <p align="right">(<a href="#ms2int">back to top</a>)</p>
@@ -335,7 +338,7 @@ Pre-trained model weights are available for download:
 
 **Inference / Training**
 
-* **All-zero intensities**: During inference, samples with intensity all zeros likely exceed the maximum supported peptide length (≤30 amino acids).
+* **All-zero intensities**: During inference, samples with intensity all zeros likely exceed the maximum supported peptide length (≤40 amino acids) or contain unsupported modification tokens.
 
 * **Out of Memory (OOM)**: Reduce batch size.
 
