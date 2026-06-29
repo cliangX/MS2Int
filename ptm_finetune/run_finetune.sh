@@ -7,11 +7,12 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-6}"
 export HDF5_USE_FILE_LOCKING=FALSE
 
 DATA_H5="${REPO_ROOT}/data/ptm_finetune/PTM_train_data_train40.h5"
+# 原 gzip 备份: PTM_train_data_train40_gzip.h5.bak (289MB)
 OUT_DIR="${REPO_ROOT}/ptm_finetune/checkpoints"
 LOG_PATH="${REPO_ROOT}/ptm_finetune/logs/finetune.log"
 
-# 续训：上一轮最佳 epoch7 微调权重（val_loss=0.3156）
-RESUME_CKPT="${REPO_ROOT}/ptm_finetune/checkpoints/model_epoch_7_val_loss_0.3156_0626_221157.pth"
+# 续训：上一轮最佳 epoch14（val_loss=0.3056）
+RESUME_CKPT="${REPO_ROOT}/ptm_finetune/checkpoints/model_epoch_14_val_loss_0.3056_0627_123641.pth"
 
 mkdir -p "${OUT_DIR}" "${REPO_ROOT}/ptm_finetune/logs"
 
