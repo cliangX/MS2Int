@@ -63,8 +63,8 @@ scripts/
 mamba_src/
 causal_conv1d_src/
 
-# Large test datasets
-tests/proteinxchange/
+# Tests (local test scripts & notebooks)
+tests/
 
 # Synology / OS
 @eaDir/
