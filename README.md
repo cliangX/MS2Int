@@ -48,7 +48,7 @@
 
 ## About The Project
 
-MS2Int is a deep learning framework that integrates internal fragment ions to enable full-spectrum MS/MS intensity prediction. Built on a bidirectional **Mamba** state space backbone and trained with **Virtual Adversarial Training (VAT)**, MS2Int jointly predicts terminal **b/y** ions and internal **m** ions. Trained on ~7.4 million precursors, MS2Int improves downstream proteomics workflows including DDA rescoring, DIA library search, HLA immunopeptidomics, and phosphosite localization.
+MS2Int is a deep learning framework that integrates internal fragment ions to enable full-spectrum MS/MS intensity prediction. Built on a bidirectional **Mamba** state space backbone and trained with **Virtual Adversarial Training (VAT)**, MS2Int jointly predicts terminal **b/y** ions and internal **m** ions. Trained on ~7.9 million precursors, MS2Int improves downstream proteomics workflows including DDA rescoring, DIA library search, HLA immunopeptidomics, and phosphosite localization.
 
 <p align="center">
   <img src="assets/model.png" alt="MS2Int model overview" width="900"/>
@@ -86,7 +86,7 @@ Ensure you have the following before installation:
 ### Dependencies
 
 * Python 3.10+
-* PyTorch 2.7+ (tested with 2.7.0; see `environment.yml` or [Installation](#installation))
+* PyTorch 2.7+ (tested with 2.7.0; see `requirement.txt` or [Installation](#installation))
 * mamba-ssm, mamba-ssm2, h5py, numpy, pandas, tqdm, einops
 
 
